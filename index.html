@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CoinPlay</title>
+<meta name="description" content="จำลองเทรด BTC เรียลไทม์ด้วยเงินจำลอง ราคาจริงจาก Binance (USD) และ Bitkub (THB) พร้อมระบบคาดการณ์ล่วงหน้า" />
+<meta name="theme-color" content="#0b0f14" />
+
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="CoinPlay" />
+<meta property="og:title" content="CoinPlay — จำลองเทรด BTC เรียลไทม์" />
+<meta property="og:description" content="ราคาจริงจาก Binance แบบเรียลไทม์ พร้อมระบบคาดการณ์ล่วงหน้าและเทรดด้วยเงินจำลอง $10,000" />
+<meta property="og:image" content="https://coinplay.web.app/og-image.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:url" content="https://coinplay.web.app/" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="CoinPlay — จำลองเทรด BTC เรียลไทม์" />
+<meta name="twitter:description" content="ราคาจริงจาก Binance แบบเรียลไทม์ พร้อมระบบคาดการณ์ล่วงหน้าและเทรดด้วยเงินจำลอง $10,000" />
+<meta name="twitter:image" content="https://coinplay.web.app/og-image.png" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+
+<div class="login-overlay" id="login-overlay">
+  <div class="login-card">
+    <div class="login-brand"><div class="mark">₿</div><div><h1>CoinPlay</h1><span>ตลาดจำลอง · ฝึกเทรด</span></div></div>
+    <button class="btn-google" id="btn-google">เข้าสู่ระบบด้วย Google</button>
+    <div class="login-error" id="login-error"></div>
+    <div class="login-note">ราคาตลาดในหน้านี้ดึงมาจากข้อมูลจริงของ Binance และ Bitkub แบบเรียลไทม์ แต่บัญชีเทรดเป็น "เงินจำลอง" ไม่ใช่เงินจริง ไม่ใช่คำแนะนำการลงทุน มี 2 บัญชีแยกกัน: Binance เริ่มด้วย $10,000 (USD), Bitkub เริ่มด้วย ฿100,000 (THB) การเทรดและกิจกรรมการใช้งานจะถูกบันทึกไว้เพื่อการวิเคราะห์</div>
+  </div>
+</div>
+
+<div class="login-overlay hidden" id="disclaimer-overlay">
+  <div class="login-card">
+    <div class="login-brand"><div class="mark">⚠️</div><div><h1>ก่อนเริ่มใช้งาน</h1><span>อ่านให้ครบก่อนนะครับ</span></div></div>
+    <ul class="disclaimer-list">
+      <li>เว็บนี้เป็น <b>ระบบทดสอบ/ฝึกซ้อมการเทรด (Paper Trading)</b> เท่านั้น</li>
+      <li>เงินทั้งหมดในระบบเป็น <b>เงินจำลอง</b> ไม่ใช่เงินจริง ไม่มีมูลค่าใดๆ นอกเว็บนี้ ถอนเป็นเงินจริงไม่ได้</li>
+      <li>ราคาตลาดที่แสดงเป็นข้อมูลจริงจาก Binance/Bitkub แต่การซื้อขายในเว็บนี้<b>ไม่เชื่อมกับบัญชีเทรดจริงใดๆ</b></li>
+      <li>จุดซื้อ/ขาย คาดการณ์ และคำแนะนำต่างๆ เป็นผลจากแบบจำลองสถิติเท่านั้น <b>ไม่ใช่คำแนะนำการลงทุน</b> และไม่รับประกันความแม่นยำ</li>
+      <li>คำสั่งรอราคา (อัตโนมัติ) ทำงานได้เฉพาะตอนเปิดหน้านี้ค้างไว้ในเบราว์เซอร์เท่านั้น</li>
+      <li>กิจกรรมการใช้งานของคุณจะถูกบันทึกไว้เพื่อการวิเคราะห์และปรับปรุงระบบ</li>
+    </ul>
+    <button class="btn btn-buy" id="btn-acknowledge" style="padding:11px 0;">เข้าใจแล้ว เริ่มใช้งาน</button>
+  </div>
+</div>
+
+<div class="wrap hidden" id="app-root">
+  <div class="topbar">
+    <div class="brand"><div class="brand-mark">₿</div><div class="brand-text"><h1>CoinPlay</h1><span>ตลาดจำลอง · ฝึกเทรด</span></div></div>
+    <div class="top-right">
+      <div class="sim-badge"><span class="dot"></span>ราคาจริงจาก Binance เรียลไทม์ · เทรดด้วยเงินจำลอง</div>
+      <div class="user-chip">
+        <img id="chip-avatar" src="" alt="" />
+        <span class="name" id="chip-name">—</span>
+        <a href="/admin.html" id="admin-link" class="hidden">แอดมิน</a>
+        <button id="btn-logout" type="button">ออกจากระบบ</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="exchange-tabs" id="exchange-tabs">
+    <button type="button" class="exchange-tab active" data-exchange="binance">Binance · ดอลลาร์ (USD)</button>
+    <button type="button" class="exchange-tab" data-exchange="bitkub">Bitkub · เงินบาท (THB)</button>
+  </div>
+
+  <div class="ticker-row">
+    <div class="price-block"><span class="label" id="pair-label">BTC / USDT</span><div class="price-main"><span id="price-val">—</span><span id="price-delta" class="price-delta">—</span></div></div>
+    <div class="stat-strip">
+      <div class="stat"><span class="label">สูงสุด 24 ชม.</span><span class="value" id="stat-high">—</span></div>
+      <div class="stat"><span class="label">ต่ำสุด 24 ชม.</span><span class="value" id="stat-low">—</span></div>
+      <div class="stat"><span class="label">ความผันผวน</span><span class="value" id="stat-vol">—</span></div>
+      <div class="stat"><span class="label">ปริมาณซื้อขาย 24 ชม.</span><span class="value" id="stat-volu">—</span></div>
+    </div>
+    <div class="speed-control"><label for="speed">ไทม์เฟรม</label><select id="speed"><option value="1m" selected>1 นาที</option><option value="5m">5 นาที</option><option value="15m">15 นาที</option><option value="1h">1 ชั่วโมง</option></select></div>
+  </div>
+
+  <div class="main-grid">
+    <div style="display:flex;flex-direction:column;gap:16px;">
+      <div class="panel">
+        <div class="panel-head">
+          <div><h2>กราฟราคา &amp; แนวโน้มคาดการณ์</h2><span class="sub">แท่งเทียนอัปเดตสด · พื้นที่แรเงา = ช่วงคาดการณ์</span></div>
+          <div class="chart-legend">
+            <span><span class="swatch" style="background:var(--up)"></span>แท่งขึ้น</span>
+            <span><span class="swatch" style="background:var(--down)"></span>แท่งลง</span>
+            <span><span class="swatch" style="background:var(--accent)"></span>เส้นคาดการณ์กลาง</span>
+          </div>
+        </div>
+        <div id="chart-wrap"><canvas id="chart"></canvas></div>
+      </div>
+      <div class="panel" id="book-panel"><div class="panel-head"><h2>ออเดอร์บุ๊ก (ข้อมูลจริงจาก Binance)</h2><span class="sub" id="book-spread">—</span></div><div class="book" id="book"></div></div>
+      <div class="panel hidden" id="bitkub-note-panel"><div class="panel-head"><h2>Bitkub · เงินบาท</h2><span class="sub">ไม่มีออเดอร์บุ๊กเรียลไทม์</span></div><p style="padding:14px 18px;color:var(--text-muted);font-size:12.5px;line-height:1.6;">Bitkub ไม่มี endpoint ออเดอร์บุ๊กที่ใช้งานได้ในตอนนี้ (ทดสอบแล้วขึ้น timeout) จึงไม่แสดงพาเนลนี้ในแท็บ Bitkub — ราคา กราฟ และการเทรดจำลองด้วยเงินบาทยังใช้งานได้ตามปกติ</p></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:16px;">
+      <div class="panel forecast-panel">
+        <div class="panel-head" style="padding:0;border:none;margin-bottom:2px;"><h2>การคาดการณ์ล่วงหน้า</h2><span class="sub" id="forecast-horizon">อีก 20 แท่งถัดไป</span></div>
+        <div class="forecast-headline"><div><div class="fh-label">เป้าหมายราคากลาง</div><div class="fh-value" id="fc-target">—</div></div><div style="text-align:right;"><div class="fh-label">เทียบราคาปัจจุบัน</div><div class="fh-value" id="fc-change">—</div></div></div>
+        <div><div class="prob-bar"><div class="prob-fill" id="prob-fill" style="width:50%"></div></div><div class="prob-labels"><span id="prob-up-lbl">ขึ้น 50%</span><span id="prob-down-lbl">ลง 50%</span></div></div>
+        <div class="range-row"><span>เปอร์เซ็นไทล์ 10 <span class="lo" id="fc-lo">—</span></span><span>เปอร์เซ็นไทล์ 90 <span class="hi" id="fc-hi">—</span></span></div>
+        <div class="forecast-note">คาดการณ์ด้วยแบบจำลอง Monte Carlo จากแนวโน้มและความผันผวนล่าสุดของราคาจริง เพื่อช่วยวางแผนการซื้อ/ขาย เป็นผลลัพธ์จากโมเดลสถิติเท่านั้น ไม่ใช่การการันตีหรือคำแนะนำการลงทุน</div>
+      </div>
+
+      <div class="panel trade-panel">
+        <div class="panel-head" style="padding:0;border:none;"><h2>การเทรดด้วยเงินจำลอง</h2></div>
+        <div class="balance-row"><div><div class="label">ยอดเงินสด</div><div class="value" id="balance">$0.00</div></div><div style="text-align:right;"><div class="label">มูลค่าพอร์ตรวม</div><div class="value" id="equity">$0.00</div></div></div>
+        <div class="pos-grid">
+          <div class="pos-cell"><div class="label">จำนวนที่ถือ</div><div class="value" id="pos-size">0.00000 BTC</div></div>
+          <div class="pos-cell"><div class="label">ราคาต้นทุนเฉลี่ย</div><div class="value" id="pos-entry">—</div></div>
+          <div class="pos-cell"><div class="label">กำไร/ขาดทุนที่ยังไม่รับรู้</div><div class="value" id="pos-pnl">$0.00</div></div>
+          <div class="pos-cell"><div class="label">ผลตอบแทน</div><div class="value" id="pos-ret">0.00%</div></div>
+        </div>
+        <div class="order-form">
+          <div class="amt-row"><input type="number" id="amt-input" placeholder="จำนวนเงิน (USD)" min="0" step="10" value="500"></div>
+          <div class="quick-amts" id="trade-quick-amts"><button type="button" data-amt="100">$100</button><button type="button" data-amt="500">$500</button><button type="button" data-amt="1000">$1,000</button><button type="button" data-amt="max">สูงสุด</button></div>
+          <div class="buy-sell"><button class="btn btn-buy" id="btn-buy">ซื้อ BTC</button><button class="btn btn-sell" id="btn-sell">ขาย BTC</button></div>
+          <div class="login-note" id="fee-note" style="border:none;padding-top:0;">คิดค่าธรรมเนียม 0.10% ต่อคำสั่ง หักจากเงินสดอัตโนมัติทุกครั้งที่ซื้อ/ขาย</div>
+          <button class="btn-reset" id="btn-reset">รีเซ็ตบัญชีนี้ (เงินจำลอง)</button>
+        </div>
+      </div>
+
+      <div class="panel trade-panel">
+        <div class="panel-head" style="padding:0;border:none;"><h2>เติมเงิน (เงินจำลอง)</h2></div>
+        <div class="order-form">
+          <div class="amt-row"><input type="number" id="topup-input" placeholder="จำนวนเงินที่เติม" min="0" step="100" value="5000"></div>
+          <div class="quick-amts" id="topup-quick-amts">
+            <button type="button" class="topup-amt" data-amt="1000">+$1,000</button>
+            <button type="button" class="topup-amt" data-amt="5000">+$5,000</button>
+            <button type="button" class="topup-amt" data-amt="10000">+$10,000</button>
+          </div>
+          <button class="btn btn-buy" id="btn-topup">เติมเงินเข้าบัญชี</button>
+          <div class="login-note" id="topup-note" style="border:none;padding-top:0;">เป็นเงินจำลองสำหรับฝึกเทรดเท่านั้น ไม่ใช่เงินจริง เติมได้ไม่จำกัดจำนวนครั้ง การเติมเงินจะถูกบันทึกไว้เพื่อการวิเคราะห์เช่นกัน</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main-grid">
+    <div class="panel">
+      <div class="panel-head"><h2>ประวัติการเทรด</h2><span class="sub">ของคุณ · กดซื้อ/ขายจากรายการได้เลย</span></div>
+      <div class="history" id="history"></div>
+    </div>
+    <div class="panel forecast-panel">
+      <div class="panel-head" style="padding:0;border:none;margin-bottom:8px;">
+        <h2>การคาดการณ์การซื้อขาย</h2>
+        <div class="profit-target-control">
+          <label for="profit-target-input">เป้าหมายกำไร</label>
+          <input type="number" id="profit-target-input" min="0.1" step="0.1" value="2">
+          <span>%</span>
+        </div>
+      </div>
+      <div class="point-sub-head">จุดซื้อแนะนำ</div>
+      <div class="horizon-list" id="horizon-list"></div>
+      <div class="point-sub-head">จุดขายแนะนำ (รายรอบที่ซื้อจริง)</div>
+      <div class="horizon-list" id="sellplan-list"></div>
+      <div class="forecast-note">ปรับเป้าหมายกำไรได้เอง ใช้คำนวณทั้งจุดซื้อและจุดขาย — จุดซื้ออ้างอิงราคาที่ขายล่าสุด (หรือแนวรับที่คาดว่าจะถึงจริง ถ้าคาดว่าราคาลงไม่ถึงเป้าหมาย) จุดขายคำนวณแยกทีละรอบที่ซื้อจริง เป็นแบบจำลองสถิติ ไม่ใช่คำแนะนำการลงทุน</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>คำสั่งรอราคา (อัตโนมัติ)</h2><span class="sub">ตั้งไว้แล้วรอราคาถึงค่อยยิงคำสั่งให้เอง</span></div>
+    <div class="order-form" style="padding:14px 18px 6px;">
+      <div class="amt-row">
+        <select id="order-side" style="flex:0 0 auto;"><option value="buy">ซื้อ</option><option value="sell">ขาย</option></select>
+        <input type="number" id="order-price" placeholder="ราคาเป้าหมาย" min="0" step="1">
+        <input type="number" id="order-amount" placeholder="จำนวนเงิน" min="0" step="10">
+        <button type="button" class="btn btn-buy" id="btn-add-order" style="flex:0 0 auto;padding:9px 16px;">ตั้งคำสั่ง</button>
+      </div>
+      <div class="login-note" style="border:none;padding-top:0;">คำสั่งจะทำงานอัตโนมัติได้ก็ต่อเมื่อ<b>เปิดหน้านี้ค้างไว้ในเบราว์เซอร์เท่านั้น</b> — ระบบไม่มีเซิร์ฟเวอร์คอยเช็คราคาแทนตอนปิดแท็บหรือปิดเครื่อง ถ้าปิดหน้านี้แล้วราคาถึงเป้าหมาย คำสั่งจะไม่ถูกยิงจนกว่าจะเปิดหน้านี้กลับมาอีกครั้ง</div>
+    </div>
+    <div class="history" id="orders-list" style="padding-top:6px;"></div>
+  </div>
+
+  <p class="footer-note">ราคาเป็นข้อมูลจริงแบบเรียลไทม์จาก Binance และ Bitkub (ข้อมูล Bitkub ส่งผ่าน CORS proxy สาธารณะของบุคคลที่สาม อาจช้า/ขัดข้องได้บ้าง) ส่วนการซื้อขายในหน้านี้ใช้เงินจำลองแยกบัญชีคนละสกุลเงินเพื่อการฝึกฝนเท่านั้น การคาดการณ์ราคาไม่ใช่คำแนะนำทางการเงิน กิจกรรมการใช้งานของคุณถูกบันทึกไว้เพื่อการวิเคราะห์ ผู้ดูแลระบบเท่านั้นที่เห็นข้อมูลรวมของทุกคน</p>
+</div>
+
+<script type="module" src="/src/app.js"></script>
+</body>
+</html>

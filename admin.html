@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CoinPlay — Admin</title>
+<meta name="robots" content="noindex, nofollow" />
+<meta name="theme-color" content="#0b0f14" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+
+<div class="login-overlay" id="login-overlay">
+  <div class="login-card">
+    <div class="login-brand"><div class="mark">₿</div><div><h1>Admin</h1><span>CoinPlay — usage &amp; logs</span></div></div>
+    <button class="btn-google" id="btn-google">เข้าสู่ระบบด้วย Google</button>
+    <div class="login-error" id="login-error"></div>
+    <div class="login-note">หน้านี้เปิดดูได้เฉพาะบัญชีผู้ดูแลระบบเท่านั้น</div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="denied-root">
+  <div class="admin-denied">
+    <div class="icon">🔒</div>
+    <h1 style="font-size:16px;">ไม่มีสิทธิ์เข้าถึงหน้านี้</h1>
+    <p style="color:var(--text-muted);font-size:13px;">บัญชีนี้ไม่ใช่ผู้ดูแลระบบ ข้อมูล logs และสถิติการใช้งานเปิดให้ดูเฉพาะอีเมลผู้ดูแลระบบเท่านั้น</p>
+    <button class="btn-reset" id="btn-logout-denied" style="margin-top:8px;">ออกจากระบบ</button>
+    <p style="margin-top:12px;"><a href="/index.html" style="color:var(--accent);font-size:13px;">กลับไปหน้าเทรด</a></p>
+  </div>
+</div>
+
+<div class="wrap hidden" id="app-root">
+  <div class="topbar">
+    <div class="brand"><div class="brand-mark">₿</div><div class="brand-text"><h1>แดชบอร์ดผู้ดูแลระบบ</h1><span>บันทึกการใช้งาน &amp; การวิเคราะห์</span></div></div>
+    <div class="top-right">
+      <div class="user-chip"><img id="chip-avatar" src="" alt=""><span class="name" id="chip-name">—</span><a href="/index.html">หน้าเทรด</a><button id="btn-logout" type="button">ออกจากระบบ</button></div>
+    </div>
+  </div>
+
+  <div class="admin-stats">
+    <div class="admin-stat"><div class="label">นักเทรดทั้งหมด</div><div class="value" id="stat-users">—</div></div>
+    <div class="admin-stat"><div class="label">คำสั่งซื้อขายทั้งหมด</div><div class="value" id="stat-trades">—</div></div>
+    <div class="admin-stat"><div class="label">อัตราส่วนซื้อ/ขาย</div><div class="value" id="stat-ratio">—</div></div>
+    <div class="admin-stat"><div class="label">มูลค่าซื้อขายรวม</div><div class="value" id="stat-volume">—</div></div>
+    <div class="admin-stat"><div class="label">ค่าธรรมเนียมรวม</div><div class="value" id="stat-fees">—</div></div>
+    <div class="admin-stat"><div class="label">กิจกรรมทั้งหมด</div><div class="value" id="stat-logs">—</div></div>
+  </div>
+
+  <div class="main-grid" style="grid-template-columns:1fr;">
+    <div class="panel">
+      <div class="panel-head"><h2>นักเทรด (เรียงตามมูลค่าพอร์ต USD)</h2><span class="sub" id="users-sub">—</span></div>
+      <div class="table-wrap">
+        <table class="admin-table" id="users-table">
+          <thead><tr><th>อีเมล</th><th>เงินสด (USD)</th><th>BTC (USD)</th><th>มูลค่าพอร์ต (USD)</th><th>ผลตอบแทน (USD)</th><th>เงินสด (THB)</th><th>BTC (THB)</th><th>มูลค่าพอร์ต (THB)</th><th>ผลตอบแทน (THB)</th><th>สมัครเมื่อ</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>คำสั่งซื้อขายล่าสุด</h2><span class="sub">ล่าสุด 100 รายการ</span></div>
+      <div class="table-wrap">
+        <table class="admin-table" id="trades-table">
+          <thead><tr><th>เวลา</th><th>อีเมล</th><th>ตลาด</th><th>ฝั่ง</th><th>ราคา</th><th>จำนวน BTC</th><th>มูลค่า</th><th>ค่าธรรมเนียม</th><th>มูลค่าพอร์ตหลังเทรด</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>บันทึกกิจกรรม</h2><span class="sub">ล่าสุด 150 รายการ — ทุกผู้ใช้</span></div>
+      <div class="table-wrap">
+        <table class="admin-table" id="logs-table">
+          <thead><tr><th>เวลา</th><th>อีเมล</th><th>ประเภท</th><th>รายละเอียด</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <p class="footer-note">ข้อมูลทั้งหมดในหน้านี้มองเห็นได้เฉพาะบัญชีผู้ดูแลระบบเท่านั้น (บังคับด้วย Firestore security rules ไม่ใช่แค่ซ่อนใน UI)</p>
+</div>
+
+<script type="module" src="/src/admin.js"></script>
+</body>
+</html>

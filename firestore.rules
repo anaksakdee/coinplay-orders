@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null && request.auth.token.email == 'anaksakdee@gmail.com';
+    }
+
+    // Trader profile: cash, btc position, avg entry. Owner can read/write their own.
+    // Admin can read everyone's (for the analytics page).
+    match /users/{uid} {
+      allow read: if request.auth != null && (request.auth.uid == uid || isAdmin());
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Trade fills: append-only, owner can create/read their own, admin can read all.
+    match /trades/{tradeId} {
+      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
+      allow read: if request.auth != null && (resource.data.uid == request.auth.uid || isAdmin());
+      allow update, delete: if false;
+    }
+
+    // Usage / activity logs: append-only, owner can create their own,
+    // but ONLY the admin email can ever read them back (per user's requirement).
+    match /logs/{logId} {
+      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+  }
+}
