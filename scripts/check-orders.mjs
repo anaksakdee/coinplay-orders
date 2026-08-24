@@ -323,7 +323,7 @@ async function processAutoTrade(db, market, price, candles) {
     if (!autoTrade || !autoTrade.enabled) continue;
     const userRef = db.collection("users").doc(uid);
 
-    // 1) เช็คขายทำกำไร/ตัดขาดทุน ทีละรอบ (FIFO เก่าสุดก่อน) — ทำได้หลายรอบต่อการรันครั้งเดียว
+    // 1) เช็คขายทำกำไร/ตัดขาดทุน ทีละรอบที่เข้าเงื่อนไข (ไม่จำเป็นต้องเป็นรอบเก่าสุด) — ทำได้หลายรอบต่อการรันครั้งเดียว
     let keepChecking = true;
     while (keepChecking) {
       keepChecking = false;
@@ -335,12 +335,16 @@ async function processAutoTrade(db, market, price, candles) {
           const freshAuto = freshLedger && freshLedger.autoTrade;
           if (!freshAuto || !freshAuto.enabled || !freshLedger.lots || !freshLedger.lots.length) return;
 
-          const lot = freshLedger.lots[0]; // เก่าสุด (FIFO)
-          const targetSell = lot.price * (1 + PROFIT_TARGET) / (1 - feeRate);
-          const stopLoss = lot.price * (1 - STOP_LOSS_PCT);
-          const atTarget = price >= targetSell;
-          const atRisk = !atTarget && signal.bearish && price <= stopLoss;
-          if (!atTarget && !atRisk) return;
+          // สแกนหารอบแรกที่เข้าเงื่อนไข (ไม่ใช่แค่รอบเก่าสุด) กันติดค้างถ้ารอบเก่าสุดยังไม่ถึงเป้าแต่รอบใหม่กว่าถึงแล้ว
+          let lot = null, atTarget = false, atRisk = false;
+          for (const l of freshLedger.lots) {
+            const targetSell = l.price * (1 + PROFIT_TARGET) / (1 - feeRate);
+            const stopLoss = l.price * (1 - STOP_LOSS_PCT);
+            const t = price >= targetSell;
+            const r = !t && signal.bearish && price <= stopLoss;
+            if (t || r) { lot = l; atTarget = t; atRisk = r; break; }
+          }
+          if (!lot) return;
 
           const result = applyTrade(freshLedger, "sell", lot.qty * price, price, feeRate);
           if (!result) return;
