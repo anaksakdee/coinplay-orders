@@ -808,7 +808,7 @@ function renderAutoTradePanel(){
     statusEl.textContent = 'ยังไม่ได้เปิดใช้งาน — เปิดแล้วระบบจะซื้อตอนสัญญาณบ่งชี้จุดซื้อ และขายทำกำไร/ตัดขาดทุนให้เองอัตโนมัติ ทำงานฝั่งเซิร์ฟเวอร์ (เช็คทุก ~5 นาที) ให้แม้ไม่เปิดหน้านี้ค้างไว้';
   } else {
     var lastBuyStr = at.lastBuyAt ? new Date(at.lastBuyAt).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'ยังไม่เคยซื้อ';
-    statusEl.textContent = 'เปิดใช้งานอยู่ — ซื้อครั้งละ '+fmtMkt(at.buyAmount,0)+' เมื่อสัญญาณบ่งชี้จุดซื้อ (ห่างกันอย่างน้อย 1 ชม./ครั้ง) · ขายทำกำไร 2% หรือตัดขาดทุนอัตโนมัติทุกรอบที่ซื้อ · ซื้อล่าสุด: '+lastBuyStr;
+    statusEl.textContent = 'เปิดใช้งานอยู่ — ซื้อครั้งละ '+fmtMkt(at.buyAmount,0)+' เมื่อสัญญาณบ่งชี้จุดซื้อ (ห่างกันอย่างน้อย 1 ชม./ครั้ง) · ขายก็ต่อเมื่อได้กำไรถึง 2%/รอบเท่านั้น ไม่มีตัดขาดทุน · ซื้อล่าสุด: '+lastBuyStr;
   }
 
   if (!sigEl) return;
