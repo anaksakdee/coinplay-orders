@@ -6,6 +6,7 @@ import {
   doc, getDoc, setDoc, updateDoc, addDoc, collection,
   serverTimestamp, query, where, limit, getDocs
 } from "firebase/firestore";
+import { computeSignal } from "../shared/signals.mjs";
 
 /* ---------------- helpers ---------------- */
 var CCY = '$'; // สัญลักษณ์สกุลเงินของแหล่งราคาตลาดที่กำลังดูอยู่ (Binance=$ USD, Bitkub=฿ THB)
@@ -100,13 +101,27 @@ document.getElementById('btn-acknowledge').addEventListener('click', function(){
 });
 
 var DCA_DEFAULT_AMT = { binance:20, bitkub:500 };
+var AUTO_TRADE_DEFAULT_AMT = { binance:20, bitkub:500 };
 
 function newDca(){
   return { enabled:false, amount:0, intervalHours:24, lastRun:null };
 }
+function newAutoTrade(){
+  return { enabled:false, buyAmount:0, lastBuyAt:null };
+}
 
 function newLedger(startingCash){
-  return { cash: startingCash, btc: 0, avgEntry: 0, lots: [], orders: [], dca: newDca() };
+  return { cash: startingCash, btc: 0, avgEntry: 0, lots: [], orders: [], dca: newDca(), lastSell: null, autoTrade: newAutoTrade() };
+}
+
+// สร้าง object เต็มของบัญชี (ทุกฟิลด์) เพื่อเขียนทับ Firestore แบบปลอดภัย — กันบั๊กเขียนทับฟิลด์อื่นหาย
+// เวลามีจุดไหนใน code ที่ replace ทั้ง map (usd/thb) แทนที่จะใช้ dotted path update
+function ledgerSnapshot(acc){
+  return {
+    cash: acc.cash, btc: acc.btc, avgEntry: acc.avgEntry, lots: acc.lots,
+    orders: acc.orders || [], dca: acc.dca || newDca(),
+    lastSell: acc.lastSell || null, autoTrade: acc.autoTrade || newAutoTrade()
+  };
 }
 
 function ensureUserDoc(user){
@@ -131,6 +146,10 @@ function ensureUserDoc(user){
       if (!currentAccount.thb.orders) currentAccount.thb.orders = [];
       if (!currentAccount.usd.dca) currentAccount.usd.dca = newDca();
       if (!currentAccount.thb.dca) currentAccount.thb.dca = newDca();
+      if (currentAccount.usd.lastSell===undefined) currentAccount.usd.lastSell = null;
+      if (currentAccount.thb.lastSell===undefined) currentAccount.thb.lastSell = null;
+      if (!currentAccount.usd.autoTrade) currentAccount.usd.autoTrade = newAutoTrade();
+      if (!currentAccount.thb.autoTrade) currentAccount.thb.autoTrade = newAutoTrade();
       return writeLog('login', {});
     } else {
       currentAccount = {
@@ -235,7 +254,7 @@ function updateExchangeUI(){
   document.getElementById('fee-note').textContent = 'คิดค่าธรรมเนียม '+(activeFeeRate()*100).toFixed(2)+'% ต่อคำสั่ง (เท่ากับอัตรามาตรฐานของ'+(activeExchange==='bitkub'?'Bitkub':'Binance')+') หักจากเงินสดอัตโนมัติทุกครั้งที่ซื้อ/ขาย';
   document.getElementById('topup-note').textContent = 'เป็นเงินจำลองสำหรับฝึกเทรดเท่านั้น ไม่ใช่เงินจริง เติมได้ไม่จำกัดจำนวนครั้ง แต่ละครั้งไม่เกิน '+fmtMkt(TOPUP_CAP[activeExchange],0)+' การเติมเงินจะถูกบันทึกไว้เพื่อการวิเคราะห์เช่นกัน';
 
-  if (currentAccount){ renderAccount(); renderHistory(); renderPendingOrders(); renderDcaPanel(); }
+  if (currentAccount){ renderAccount(); renderHistory(); renderPendingOrders(); renderDcaPanel(); renderAutoTradePanel(); }
   if (marketStarted){ renderTradePoints(); renderSellPlan(); }
 }
 
@@ -637,6 +656,7 @@ function doTrade(side, amtRaw, horizonKey){
     acc.btc -= qty;
     acc.cash += (amt - fee);
     if (acc.btc < 1e-9) { acc.btc = 0; acc.lots = []; }
+    acc.lastSell = { price: price, usd: amt, qty: qty, ts: Date.now() };
   }
   var lotsTotalCost = acc.lots.reduce(function(a,l){ return a + l.qty*l.price; }, 0);
   acc.avgEntry = acc.btc>0 ? lotsTotalCost/acc.btc : 0;
@@ -647,7 +667,7 @@ function doTrade(side, amtRaw, horizonKey){
 
   var updatePath = LEDGER_KEY[activeExchange];
   var updateObj = {};
-  updateObj[updatePath] = { cash: acc.cash, btc: acc.btc, avgEntry: acc.avgEntry, lots: acc.lots, orders: acc.orders||[] };
+  updateObj[updatePath] = ledgerSnapshot(acc);
 
   tradeBusy = true;
   setBusy(true);
@@ -697,16 +717,16 @@ function doReset(){
   if (!currentAccount || tradeBusy) return;
   var acc = ledger();
   var starting = STARTING_BALANCE[activeExchange];
-  acc.cash = starting; acc.btc = 0; acc.avgEntry = 0; acc.lots = []; acc.orders = []; acc.dca = newDca();
+  acc.cash = starting; acc.btc = 0; acc.avgEntry = 0; acc.lots = []; acc.orders = []; acc.dca = newDca(); acc.lastSell = null; acc.autoTrade = newAutoTrade();
   var updatePath = LEDGER_KEY[activeExchange];
   var updateObj = {};
-  updateObj[updatePath] = { cash: starting, btc: 0, avgEntry: 0, lots: [], orders: [], dca: newDca() };
+  updateObj[updatePath] = ledgerSnapshot(acc);
 
   tradeBusy = true; setBusy(true);
   updateDoc(doc(db,'users',currentUid), updateObj)
     .then(function(){ return writeLog('reset_account', { market: activeExchange }); })
     .catch(function(err){ console.error('reset failed', err); })
-    .finally(function(){ tradeBusy=false; setBusy(false); renderAccount(); renderSellPlan(); renderPendingOrders(); renderDcaPanel(); });
+    .finally(function(){ tradeBusy=false; setBusy(false); renderAccount(); renderSellPlan(); renderPendingOrders(); renderDcaPanel(); renderAutoTradePanel(); });
 }
 
 /* ---------------- DCA อัตโนมัติ (ซื้อ BTC จำนวนคงที่ตามรอบเวลา เพื่อเก็บสะสม) ---------------- */
@@ -754,6 +774,57 @@ function renderDcaPanel(){
 }
 
 document.getElementById('btn-save-dca').addEventListener('click', saveDca);
+
+/* ---------------- ออโต้เทรดเต็มรูปแบบ (ซื้อ-ขายอัตโนมัติตามสัญญาณ) ---------------- */
+// การตัดสินใจจริงทำที่ฝั่งเซิร์ฟเวอร์ (check-orders.mjs) โดยใช้โมเดลรวมสัญญาณเดียวกับที่แสดงผลตรงนี้
+// (Monte Carlo + RSI + EMA trend + Bollinger Bands) เพื่อให้สิ่งที่เห็นตรงกับสิ่งที่ระบบใช้ตัดสินใจจริง
+var lastSignal = null;
+
+function saveAutoTrade(){
+  if (!currentAccount || !currentUid) return;
+  var acc = ledger();
+  var enabled = document.getElementById('auto-trade-enabled').checked;
+  var buyAmount = parseFloat(document.getElementById('auto-trade-amount').value)||0;
+  if (enabled && buyAmount<=0) return;
+  acc.autoTrade = { enabled: enabled, buyAmount: buyAmount, lastBuyAt: (acc.autoTrade && acc.autoTrade.lastBuyAt) || null };
+  var updateObj = {};
+  updateObj[LEDGER_KEY[activeExchange]+'.autoTrade'] = acc.autoTrade;
+  updateDoc(doc(db,'users',currentUid), updateObj).catch(function(err){ console.error('saveAutoTrade failed', err); });
+  writeLog('auto_trade_settings_saved', { market:activeExchange, enabled:enabled, buyAmount: Math.round(buyAmount*100)/100 });
+  renderAutoTradePanel();
+}
+
+function renderAutoTradePanel(){
+  var enabledEl = document.getElementById('auto-trade-enabled');
+  if (!enabledEl) return;
+  var acc = ledger();
+  var at = (acc && acc.autoTrade) || newAutoTrade();
+  enabledEl.checked = !!at.enabled;
+  document.getElementById('auto-trade-amount').value = at.buyAmount || AUTO_TRADE_DEFAULT_AMT[activeExchange];
+
+  var statusEl = document.getElementById('auto-trade-status');
+  var sigEl = document.getElementById('auto-trade-signal');
+  if (!at.enabled){
+    statusEl.textContent = 'ยังไม่ได้เปิดใช้งาน — เปิดแล้วระบบจะซื้อตอนสัญญาณบ่งชี้จุดซื้อ และขายทำกำไร/ตัดขาดทุนให้เองอัตโนมัติ ทำงานฝั่งเซิร์ฟเวอร์ (เช็คทุก ~5 นาที) ให้แม้ไม่เปิดหน้านี้ค้างไว้';
+  } else {
+    var lastBuyStr = at.lastBuyAt ? new Date(at.lastBuyAt).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'ยังไม่เคยซื้อ';
+    statusEl.textContent = 'เปิดใช้งานอยู่ — ซื้อครั้งละ '+fmtMkt(at.buyAmount,0)+' เมื่อสัญญาณบ่งชี้จุดซื้อ (ห่างกันอย่างน้อย 1 ชม./ครั้ง) · ขายทำกำไร 2% หรือตัดขาดทุนอัตโนมัติทุกรอบที่ซื้อ · ซื้อล่าสุด: '+lastBuyStr;
+  }
+
+  if (!sigEl) return;
+  if (!lastSignal || !lastSignal.forecast){
+    sigEl.textContent = 'กำลังโหลดสัญญาณ...';
+    return;
+  }
+  var s = lastSignal;
+  var trendTxt = s.trendUp==null ? 'ไม่มีข้อมูล' : (s.trendUp ? 'ขาขึ้น (EMA9>EMA21)' : 'ขาลง (EMA9<EMA21)');
+  var rsiTxt = s.rsi==null ? 'ไม่มีข้อมูล' : s.rsi.toFixed(1)+(s.overbought?' (ซื้อมากไป)':s.oversold?' (ขายมากไป)':'');
+  var bbTxt = !s.bb ? 'ไม่มีข้อมูล' : (s.nearUpperBand?'ราคาชนกรอบบน':s.nearLowerBand?'ราคาชนกรอบล่าง':'อยู่ในกรอบปกติ');
+  var overallTxt = s.bearish ? 'สัญญาณรวม: เอนไปทางขาลง ('+s.bearishVotes+'/'+s.totalVotes+' เสียง)' : s.bullish ? 'สัญญาณรวม: เอนไปทางขาขึ้น ('+s.bullishVotes+'/'+s.totalVotes+' เสียง)' : 'สัญญาณรวม: กลางๆ ไม่ชัดเจน';
+  sigEl.innerHTML = '<b>'+overallTxt+'</b> · แนวโน้ม (EMA): '+trendTxt+' · RSI(14): '+rsiTxt+' · Bollinger Bands: '+bbTxt+' · Monte Carlo ขึ้น '+Math.round(s.forecast.probUp*100)+'%';
+}
+
+document.getElementById('btn-save-auto-trade').addEventListener('click', saveAutoTrade);
 
 /* ---------------- คำสั่งรอราคา (auto — ทำงานเฉพาะตอนเปิดหน้านี้ค้างไว้) ---------------- */
 function createOrder(side, targetPrice, amount){
@@ -1043,6 +1114,7 @@ function onMarketUpdate(){
     if (f){ lastForecast = f; renderForecastPanel(lastForecast); }
     renderTradePoints();
     renderSellPlan();
+    if (candles.length>=25){ lastSignal = computeSignal(price, candles, returns); renderAutoTradePanel(); }
   }
   drawChart(lastForecast);
   renderAccount();
