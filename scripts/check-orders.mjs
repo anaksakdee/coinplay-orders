@@ -316,7 +316,34 @@ async function processDCA(db, market, price) {
   console.log(`[dca:${market}] done, ${count} executed`);
 }
 
-// ออโต้เทรดเต็มรูปแบบ — ใช้สัญญาณรวม (Monte Carlo + RSI + EMA trend + Bollinger Bands) ตัดสินใจซื้อ/ขายเอง
+// สรุปว่าใช้เทคนิคไหนบ้างและค่าที่ได้ตอนตัดสินใจครั้งนี้ — บันทึกลง logs ทุกครั้งที่เทรด เพื่อย้อนดูทีหลังว่า
+// เทคนิคไหนช่วย/ทำให้พลาดบ่อย จะได้เอาไปปรับปรุงโมเดล (ถ่วงน้ำหนักเทคนิคใหม่, ตัดเทคนิคที่ไม่ช่วย ฯลฯ)
+function signalSummary(signal) {
+  const techniques = [];
+  if (signal.forecast) {
+    techniques.push({
+      name: "monte_carlo_forecast",
+      probUp: Math.round(signal.forecast.probUp * 100) / 100,
+      p10: Math.round(signal.forecast.p10 * 100) / 100,
+      p90: Math.round(signal.forecast.p90 * 100) / 100,
+    });
+  }
+  if (signal.rsi != null) {
+    techniques.push({ name: "rsi_14", value: Math.round(signal.rsi * 10) / 10, overbought: signal.overbought, oversold: signal.oversold });
+  }
+  if (signal.trendUp != null) {
+    techniques.push({ name: "ema_9_21_trend", trendUp: signal.trendUp, emaFast: Math.round(signal.emaFast * 100) / 100, emaSlow: Math.round(signal.emaSlow * 100) / 100 });
+  }
+  if (signal.bb) {
+    techniques.push({ name: "bollinger_bands_20_2", nearUpperBand: signal.nearUpperBand, nearLowerBand: signal.nearLowerBand, upper: Math.round(signal.bb.upper * 100) / 100, lower: Math.round(signal.bb.lower * 100) / 100 });
+  }
+  if (signal.macd) {
+    techniques.push({ name: "macd_12_26_9", histogram: Math.round(signal.macd.histogram * 100) / 100, bearish: signal.macdBearish, bullish: signal.macdBullish });
+  }
+  return { techniques, bearishVotes: signal.bearishVotes, bullishVotes: signal.bullishVotes, totalVotes: signal.totalVotes, bearish: signal.bearish, bullish: signal.bullish };
+}
+
+// ออโต้เทรดเต็มรูปแบบ — ใช้สัญญาณรวม (Monte Carlo + RSI + EMA trend + Bollinger Bands + MACD) ตัดสินใจซื้อ/ขายเอง
 // ซื้อ: อ้างอิงจุดซื้อแบบเดียวกับฝั่งเว็บ (ต่ำกว่าราคาขายล่าสุด หรือแนวรับที่คาดการณ์) + ต้องไม่ overbought ด้วย
 // ขาย: ขายทำกำไรเมื่อถึงเป้าหมาย 2% ต่อรอบ (FIFO) หรือตัดขาดทุนเมื่อขาดทุนเกิน 2% และสัญญาณยืนยันเป็นขาลง (confluence)
 async function processAutoTrade(db, market, price, candles) {
@@ -332,7 +359,7 @@ async function processAutoTrade(db, market, price, candles) {
     console.log(`[auto:${market}] not enough data for signal, skipping`);
     return;
   }
-  console.log(`[auto:${market}] price=${price} bearish=${signal.bearish} bullish=${signal.bullish} rsi=${signal.rsi ? signal.rsi.toFixed(1) : "n/a"} probUp=${signal.forecast.probUp.toFixed(2)}`);
+  console.log(`[auto:${market}] price=${price} bearish=${signal.bearish} bullish=${signal.bullish} (${signal.bearishVotes}b/${signal.bullishVotes}u of ${signal.totalVotes}) rsi=${signal.rsi ? signal.rsi.toFixed(1) : "n/a"} probUp=${signal.forecast.probUp.toFixed(2)} macdHist=${signal.macd ? signal.macd.histogram.toFixed(2) : "n/a"}`);
 
   const usersSnap = await db.collection("users").get();
   const now = Date.now();
@@ -399,6 +426,7 @@ async function processAutoTrade(db, market, price, candles) {
             detail: {
               market, side: "sell", reason: atTarget ? "profit_target" : "stop_loss",
               price: Math.round(price * 100) / 100, amount: Math.round(result.amount * 100) / 100, source: "background",
+              lotBoughtAt: lot.price, signals: signalSummary(signal),
             },
             ts: Timestamp.now(),
           });
@@ -467,6 +495,7 @@ async function processAutoTrade(db, market, price, candles) {
           detail: {
             market, side: "buy", reason: limitedDownside ? "forecast_floor" : (lastSell ? "edge_vs_last_sell" : "forecast_floor"),
             price: Math.round(price * 100) / 100, amount: Math.round(result.amount * 100) / 100, source: "background",
+            targetPrice: Math.round(targetPrice * 100) / 100, signals: signalSummary(signal),
           },
           ts: Timestamp.now(),
         });

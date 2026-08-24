@@ -820,8 +820,9 @@ function renderAutoTradePanel(){
   var trendTxt = s.trendUp==null ? 'ไม่มีข้อมูล' : (s.trendUp ? 'ขาขึ้น (EMA9>EMA21)' : 'ขาลง (EMA9<EMA21)');
   var rsiTxt = s.rsi==null ? 'ไม่มีข้อมูล' : s.rsi.toFixed(1)+(s.overbought?' (ซื้อมากไป)':s.oversold?' (ขายมากไป)':'');
   var bbTxt = !s.bb ? 'ไม่มีข้อมูล' : (s.nearUpperBand?'ราคาชนกรอบบน':s.nearLowerBand?'ราคาชนกรอบล่าง':'อยู่ในกรอบปกติ');
+  var macdTxt = !s.macd ? 'ไม่มีข้อมูล' : s.macd.histogram.toFixed(1)+(s.macdBullish?' (ขาขึ้น)':s.macdBearish?' (ขาลง)':'');
   var overallTxt = s.bearish ? 'สัญญาณรวม: เอนไปทางขาลง ('+s.bearishVotes+'/'+s.totalVotes+' เสียง)' : s.bullish ? 'สัญญาณรวม: เอนไปทางขาขึ้น ('+s.bullishVotes+'/'+s.totalVotes+' เสียง)' : 'สัญญาณรวม: กลางๆ ไม่ชัดเจน';
-  sigEl.innerHTML = '<b>'+overallTxt+'</b> · แนวโน้ม (EMA): '+trendTxt+' · RSI(14): '+rsiTxt+' · Bollinger Bands: '+bbTxt+' · Monte Carlo ขึ้น '+Math.round(s.forecast.probUp*100)+'%';
+  sigEl.innerHTML = '<b>'+overallTxt+'</b> · แนวโน้ม (EMA): '+trendTxt+' · RSI(14): '+rsiTxt+' · Bollinger Bands: '+bbTxt+' · MACD: '+macdTxt+' · Monte Carlo ขึ้น '+Math.round(s.forecast.probUp*100)+'%';
 }
 
 document.getElementById('btn-save-auto-trade').addEventListener('click', saveAutoTrade);
