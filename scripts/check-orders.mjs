@@ -115,6 +115,29 @@ function applyTrade(ledger, side, amountRaw, price, feeRate) {
   return { ledger: acc, amount, fee, qty };
 }
 
+// ขาย "รอบที่ระบุ" เจาะจงตัวล็อตนั้นโดยตรง (ไม่ใช้ FIFO ทั่วไปแบบ applyTrade) — จำเป็นสำหรับออโต้เทรด
+// เพราะรอบที่เข้าเงื่อนไข (กำไรถึงเป้า/ขาดทุนเกิน) อาจไม่ใช่ล็อตที่เก่าที่สุด การใช้ applyTrade ทั่วไป
+// จะไปกินโควตาจากล็อตหน้าสุดผิดตัว ทำให้ล็อตที่เข้าเงื่อนไขจริงไม่เคยถูกขายออกและวนซ้ำไม่รู้จบ
+function sellSpecificLot(ledger, matchLot, price, feeRate) {
+  const lots = (ledger.lots || []).map((l) => ({ ...l }));
+  const idx = lots.findIndex((l) => l.ts === matchLot.ts && Math.abs(l.price - matchLot.price) < 1e-9);
+  if (idx === -1) return null; // ล็อตนี้ถูกจัดการไปแล้ว (เช่น รันซ้อนกัน) ข้ามไป
+
+  const lot = lots[idx];
+  const amount = lot.qty * price;
+  if (amount <= 0.01) return null;
+  const fee = amount * feeRate;
+
+  lots.splice(idx, 1);
+  let btc = ledger.btc - lot.qty;
+  const cash = ledger.cash + amount - fee;
+  if (btc < 1e-9) btc = 0;
+  const lotsTotalCost = lots.reduce((a, l) => a + l.qty * l.price, 0);
+  const avgEntry = btc > 0 ? lotsTotalCost / btc : 0;
+
+  return { ledger: { cash, btc, avgEntry, lots, orders: ledger.orders || [] }, amount, fee, qty: lot.qty };
+}
+
 async function processMarket(db, market, price) {
   if (!price) {
     console.log(`[${market}] no price available, skipping`);
@@ -324,9 +347,12 @@ async function processAutoTrade(db, market, price, candles) {
     const userRef = db.collection("users").doc(uid);
 
     // 1) เช็คขายทำกำไร/ตัดขาดทุน ทีละรอบที่เข้าเงื่อนไข (ไม่จำเป็นต้องเป็นรอบเก่าสุด) — ทำได้หลายรอบต่อการรันครั้งเดียว
+    // จำกัดจำนวนรอบสูงสุดต่อผู้ใช้ต่อการรัน กันวนซ้ำไม่รู้จบหากมีบั๊กที่ยังไม่รู้ตัวในอนาคต
     let keepChecking = true;
-    while (keepChecking) {
+    let safetyGuard = 0;
+    while (keepChecking && safetyGuard < 30) {
       keepChecking = false;
+      safetyGuard++;
       try {
         await db.runTransaction(async (tx) => {
           const snap = await tx.get(userRef);
@@ -346,7 +372,8 @@ async function processAutoTrade(db, market, price, candles) {
           }
           if (!lot) return;
 
-          const result = applyTrade(freshLedger, "sell", lot.qty * price, price, feeRate);
+          // ขายเจาะจงล็อตที่เข้าเงื่อนไขตัวนั้นโดยตรง (ไม่ใช่ applyTrade แบบ FIFO ทั่วไป — ดูเหตุผลที่ sellSpecificLot)
+          const result = sellSpecificLot(freshLedger, lot, price, feeRate);
           if (!result) return;
           const equity = result.ledger.cash + result.ledger.btc * price;
           const lastSell = { price, usd: result.amount, qty: result.qty, ts: now };
@@ -474,7 +501,13 @@ async function main() {
   console.log("done");
 }
 
-main().catch((err) => {
-  console.error("check-orders failed:", err);
-  process.exit(1);
-});
+// ส่งออกไว้สำหรับการทดสอบแบบ unit test เฉพาะจุด (scripts/_unit-test-*.mjs) — ไม่กระทบการรันจริงผ่าน main()
+export { applyTrade, sellSpecificLot };
+
+// รันเฉพาะตอนเรียกไฟล์นี้ตรงๆ (node scripts/check-orders.mjs) ไม่ใช่ตอน import ไปทดสอบ
+if (process.argv[1] && process.argv[1].endsWith("check-orders.mjs")) {
+  main().catch((err) => {
+    console.error("check-orders failed:", err);
+    process.exit(1);
+  });
+}
