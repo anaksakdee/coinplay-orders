@@ -13,9 +13,21 @@ function getServiceAccount() {
 }
 
 async function fetchBinancePrice() {
-  const res = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
-  const data = await res.json();
-  return parseFloat(data.price);
+  // api.binance.com บล็อก IP ของ GitHub Actions runner (มักอยู่ในสหรัฐฯ) ด้วยเหตุผลกฎหมาย
+  // ลอง Binance ก่อน แล้วสำรองด้วย CoinGecko ถ้าเรียกไม่ได้
+  try {
+    const res = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    if (!res.ok) throw new Error("binance http " + res.status);
+    const data = await res.json();
+    const p = parseFloat(data.price);
+    if (p > 0) return p;
+    throw new Error("binance returned invalid price");
+  } catch (err) {
+    console.warn("binance fetch failed, falling back to CoinGecko:", err.message);
+    const res2 = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+    const data2 = await res2.json();
+    return data2.bitcoin ? data2.bitcoin.usd : null;
+  }
 }
 
 async function fetchBitkubPrice() {
