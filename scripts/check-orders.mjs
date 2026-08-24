@@ -6,7 +6,8 @@ import { computeReturns, computeSignal } from "../shared/signals.mjs";
 
 const FEE_RATES = { binance: 0.001, bitkub: 0.0025 };
 const LEDGER_KEY = { binance: "usd", bitkub: "thb" };
-const PROFIT_TARGET = 0.02; // เป้าหมายกำไรขั้นต่ำต่อรอบ 2% (ตรงกับฝั่งเว็บ) — ออโต้เทรดขายเมื่อถึงเป้านี้เท่านั้น ไม่มีตัดขาดทุน
+const PROFIT_TARGET = 0.02; // เป้าหมายกำไรขั้นต่ำต่อรอบ 2% (ตรงกับฝั่งเว็บ)
+const STOP_LOSS_PCT = 0.05; // ตัดขาดทุนเฉพาะตอน "จำเป็นจริงๆ" เท่านั้น — ขาดทุนหนักถึง 5% และสัญญาณรวมยืนยันเป็นขาลงชัดเจน (ไม่ใช่แค่ผันผวนระยะสั้น)
 const AUTO_TRADE_BUY_COOLDOWN_MS = 60 * 60 * 1000; // ห่างกันอย่างน้อย 1 ชม.ต่อการซื้ออัตโนมัติ 1 ครั้ง กันซื้อรัวทุก 5 นาทีตอนราคานิ่งต่ำกว่าเป้า
 const KLINE_LIMIT = 120;
 
@@ -343,10 +344,10 @@ function signalSummary(signal) {
 }
 
 // ออโต้เทรดเต็มรูปแบบ — ใช้สัญญาณรวม (Monte Carlo + RSI + EMA trend + Bollinger Bands + MACD) ตัดสินใจซื้อ/ขายเอง
-// นโยบาย: ซื้อราคาต่ำ-ขายราคาสูง เพื่อ "เก็บสะสมเหรียญ" ไม่ใช่ไล่ซื้ออย่างเดียว แต่ก็ไม่ขายขาดทุนเด็ดขาด
+// นโยบาย: ซื้อราคาต่ำ-ขายราคาสูง เพื่อ "เก็บสะสมเหรียญ" ไม่ใช่ไล่ซื้ออย่างเดียว
 //   ซื้อ: ต้องถึงจุดซื้อที่คำนวณไว้ (ต่ำกว่าราคาขายล่าสุด หรือแนวรับที่คาดการณ์) และสัญญาณรวมต้องไม่ชี้ขาลง (ไม่ใช่ bearish) และไม่ overbought
-//   ขาย: ขายก็ต่อเมื่อได้กำไรถึงเป้าหมาย 2% ต่อรอบเท่านั้น (การันตีกำไรทุกครั้งที่เทรด) — ไม่มีการตัดขาดทุนอัตโนมัติ
-//        ถ้าราคายังไม่ถึงเป้ากำไร ระบบจะถือรอต่อไปเรื่อยๆ จนกว่าจะได้กำไรจริง แล้วเอากำไรไปซื้อรอบใหม่ต่อ (compounding)
+//   ขาย: ขายทำกำไรเมื่อถึงเป้าหมาย 2% ต่อรอบ — ปกติจะถือรอจนกำไรจริงเสมอ
+//        ตัดขาดทุนเฉพาะตอน "จำเป็นจริงๆ" เท่านั้น: ขาดทุนหนักถึง 5% ต่อรอบ และสัญญาณรวมยืนยันเป็นขาลงชัดเจน (เสียงข้างมากจาก 5 เทคนิค)
 async function processAutoTrade(db, market, price, candles) {
   if (!price || !candles || candles.length < 25) {
     console.log(`[auto:${market}] no price/candles, skipping`);
@@ -389,11 +390,15 @@ async function processAutoTrade(db, market, price, candles) {
           const freshAuto = freshLedger && freshLedger.autoTrade;
           if (!freshAuto || !freshAuto.enabled || !freshLedger.lots || !freshLedger.lots.length) return;
 
-          // สแกนหารอบแรกที่ "ได้กำไรถึงเป้าแล้ว" เท่านั้น (ไม่ใช่แค่รอบเก่าสุด) — ไม่มีการตัดขาดทุน ขายเมื่อกำไรจริงเท่านั้น
-          let lot = null;
+          // สแกนหารอบแรกที่เข้าเงื่อนไข (ไม่ใช่แค่รอบเก่าสุด): ได้กำไรถึงเป้า หรือ "จำเป็นต้องตัดขาดทุน" จริงๆ
+          // (ขาดทุนหนักถึง 5% + สัญญาณรวมยืนยันขาลงชัดเจน ไม่ใช่แค่ผันผวนระยะสั้น) — ไม่ใช่ตัดขาดทุนพร่ำเพรื่อ
+          let lot = null, atTarget = false, atRisk = false;
           for (const l of freshLedger.lots) {
             const targetSell = l.price * (1 + PROFIT_TARGET) / (1 - feeRate);
-            if (price >= targetSell) { lot = l; break; }
+            const stopLoss = l.price * (1 - STOP_LOSS_PCT);
+            const t = price >= targetSell;
+            const r = !t && signal.bearish && price <= stopLoss;
+            if (t || r) { lot = l; atTarget = t; atRisk = r; break; }
           }
           if (!lot) return;
 
@@ -422,7 +427,7 @@ async function processAutoTrade(db, market, price, candles) {
           tx.set(logRef, {
             uid, email: fresh.email || null, type: "auto_trade_triggered",
             detail: {
-              market, side: "sell", reason: "profit_target",
+              market, side: "sell", reason: atTarget ? "profit_target" : "stop_loss",
               price: Math.round(price * 100) / 100, amount: Math.round(result.amount * 100) / 100, source: "background",
               lotBoughtAt: lot.price, signals: signalSummary(signal),
             },
