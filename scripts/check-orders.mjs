@@ -8,6 +8,15 @@ const FEE_RATES = { binance: 0.001, bitkub: 0.0025 };
 const LEDGER_KEY = { binance: "usd", bitkub: "thb" };
 const PROFIT_TARGET = 0.02; // เป้าหมายกำไรขั้นต่ำต่อรอบ 2% (ตรงกับฝั่งเว็บ)
 const STOP_LOSS_PCT = 0.05; // ตัดขาดทุนเฉพาะตอน "จำเป็นจริงๆ" เท่านั้น — ขาดทุนหนักถึง 5% และสัญญาณรวมยืนยันเป็นขาลงชัดเจน (ไม่ใช่แค่ผันผวนระยะสั้น)
+const BTC_ACCUM_TARGET = 0.01; // เป้าหมายหลัก: จบรอบเทรดครบวง (ขายแล้วซื้อคืน) ต้องได้จำนวน BTC เพิ่มขึ้นอย่างน้อย 1%
+
+// ราคาซื้อคืนสูงสุดที่ยังทำให้ได้ "จำนวนเหรียญเพิ่มขึ้น" ตามเป้า หลังหักค่าธรรมเนียมทั้งขาขายและขาซื้อแล้ว
+//   ขาย Q เหรียญที่ Ps -> ได้เงินสด Q*Ps*(1-f) -> ซื้อคืนที่ Pb ได้ Q' = Q*Ps*(1-f) / (Pb*(1+f))
+//   ต้องการ Q'/Q >= 1+g  =>  Pb <= Ps*(1-f) / ((1+f)*(1+g))
+// ถ้าซื้อคืนแพงกว่านี้ ต่อให้ "กำไรเป็นเงิน" ก็จะได้เหรียญ "น้อยลง" ซึ่งขัดกับเป้าหมายสะสม BTC
+function btcAccumCeiling(sellPrice, feeRate, gain) {
+  return (sellPrice * (1 - feeRate)) / ((1 + feeRate) * (1 + gain));
+}
 const AUTO_TRADE_BUY_COOLDOWN_MS = 60 * 60 * 1000; // ห่างกันอย่างน้อย 1 ชม.ต่อการซื้ออัตโนมัติ 1 ครั้ง กันซื้อรัวทุก 5 นาทีตอนราคานิ่งต่ำกว่าเป้า
 const KLINE_LIMIT = 120;
 
@@ -460,31 +469,57 @@ async function processAutoTrade(db, market, price, candles) {
         const possibleDropPct = Math.max(0, (price - forecastFloor) / price * 100);
         const limitedDownside = possibleDropPct < PROFIT_TARGET * 100;
         const mechanicalTarget = lastSell ? lastSell.price / (1 + PROFIT_TARGET) : null;
-        let targetPrice;
-        if (limitedDownside) targetPrice = Math.min(price, forecastFloor);
-        else if (mechanicalTarget != null) targetPrice = mechanicalTarget;
-        else targetPrice = forecastFloor;
+        let targetPrice, buyReason;
+        if (limitedDownside) { targetPrice = Math.min(price, forecastFloor); buyReason = "forecast_floor"; }
+        else if (mechanicalTarget != null) { targetPrice = mechanicalTarget; buyReason = "edge_vs_last_sell"; }
+        else { targetPrice = forecastFloor; buyReason = "forecast_floor"; }
+
+        // เพดานบังคับ: ถ้ากำลังซื้อคืนหลังจากขายไป ราคาซื้อคืนต้องต่ำพอที่จะได้ "จำนวนเหรียญเพิ่มขึ้น" จริง
+        // จุดนี้สำคัญที่สุดต่อเป้าหมายสะสม BTC — ไม่ว่าโมเดลจะมองบวกแค่ไหนก็ห้ามซื้อคืนแพงกว่าเพดานนี้
+        // (ก่อนหน้านี้มีบั๊ก: ตอน limitedDownside และโมเดลคาดว่าราคาจะขึ้น targetPrice จะกลายเป็นราคาตลาดปัจจุบัน
+        //  ทำให้ซื้อคืนที่ราคาเดียวกับที่เพิ่งขาย = เสียเหรียญให้ค่าธรรมเนียมทุกรอบ)
+        if (lastSell && lastSell.qty > 0) {
+          const ceiling = btcAccumCeiling(lastSell.price, feeRate, BTC_ACCUM_TARGET);
+          if (targetPrice > ceiling) { targetPrice = ceiling; buyReason = "btc_accumulation_ceiling"; }
+        }
         if (price > targetPrice) return; // ยังไม่ถึงจุดซื้อ
 
-        const buyAmount = lastSell ? lastSell.usd : freshAuto.buyAmount;
+        // ซื้อคืนด้วย "เงินที่ได้จากการขายรอบนั้น" พอดี (ไม่กินเงินสดส่วนอื่นในบัญชี)
+        // lastSell.usd เป็นยอดก่อนหักค่าธรรมเนียม เงินสดที่ได้จริง = usd*(1-f) และเวลาซื้อต้องกันค่าธรรมเนียมไว้อีก (1+f)
+        const buyAmount = lastSell && lastSell.usd > 0
+          ? (lastSell.usd * (1 - feeRate)) / (1 + feeRate)
+          : freshAuto.buyAmount;
         if (!(buyAmount > 0)) return;
 
         const result = applyTrade(freshLedger, "buy", buyAmount, price, feeRate);
-        const newAuto = { enabled: freshAuto.enabled, buyAmount: freshAuto.buyAmount, lastBuyAt: freshAuto.lastBuyAt || null };
+        const newAuto = {
+          enabled: freshAuto.enabled, buyAmount: freshAuto.buyAmount, lastBuyAt: freshAuto.lastBuyAt || null,
+          roundTrips: freshAuto.roundTrips || 0, btcAccumulated: freshAuto.btcAccumulated || 0,
+        };
         if (!result) {
           tx.update(userRef, { [`${ledgerKey}.autoTrade`]: newAuto });
           return;
         }
         newAuto.lastBuyAt = now;
 
+        // จบรอบเทรดครบวง (ขาย -> ซื้อคืน) วัดผลเป็น "จำนวนเหรียญที่ได้เพิ่ม" ตามเป้าหมายจริงของระบบ
+        const btcDelta = lastSell && lastSell.qty > 0 ? result.qty - lastSell.qty : null;
+        if (btcDelta != null) {
+          newAuto.roundTrips = (freshAuto.roundTrips || 0) + 1;
+          newAuto.btcAccumulated = (freshAuto.btcAccumulated || 0) + btcDelta;
+        }
+
         const equity = result.ledger.cash + result.ledger.btc * price;
-        tx.update(userRef, {
+        const updatePayload = {
           [`${ledgerKey}.cash`]: result.ledger.cash,
           [`${ledgerKey}.btc`]: result.ledger.btc,
           [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
           [`${ledgerKey}.lots`]: result.ledger.lots,
           [`${ledgerKey}.autoTrade`]: newAuto,
-        });
+        };
+        // ปิดรอบแล้ว ล้าง lastSell ทิ้ง กันไม่ให้รอบถัดไปนับซ้ำกับการขายเดิม (และไม่ให้ติดเพดานของรอบที่จบไปแล้ว)
+        if (btcDelta != null) updatePayload[`${ledgerKey}.lastSell`] = null;
+        tx.update(userRef, updatePayload);
 
         const tradeRef = db.collection("trades").doc();
         tx.set(tradeRef, {
@@ -497,12 +532,22 @@ async function processAutoTrade(db, market, price, candles) {
         tx.set(logRef, {
           uid, email: fresh.email || null, type: "auto_trade_triggered",
           detail: {
-            market, side: "buy", reason: limitedDownside ? "forecast_floor" : (lastSell ? "edge_vs_last_sell" : "forecast_floor"),
+            market, side: "buy", reason: buyReason,
             price: Math.round(price * 100) / 100, amount: Math.round(result.amount * 100) / 100, source: "background",
             targetPrice: Math.round(targetPrice * 100) / 100, signals: signalSummary(signal),
+            // ผลลัพธ์ที่เป็นเป้าหมายจริงของระบบ: รอบนี้ได้เหรียญเพิ่มขึ้นกี่เหรียญ / กี่เปอร์เซ็นต์
+            btcSold: btcDelta != null ? lastSell.qty : null,
+            btcBought: result.qty,
+            btcDelta: btcDelta,
+            btcDeltaPct: btcDelta != null ? Math.round((result.qty / lastSell.qty - 1) * 10000) / 100 : null,
+            btcAccumulatedTotal: newAuto.btcAccumulated,
+            roundTrips: newAuto.roundTrips,
           },
           ts: Timestamp.now(),
         });
+        if (btcDelta != null) {
+          console.log(`[auto:${market}] round trip closed for ${uid}: sold ${lastSell.qty.toFixed(8)} -> bought ${result.qty.toFixed(8)} BTC (${(result.qty / lastSell.qty * 100 - 100).toFixed(3)}%)`);
+        }
 
         buyCount++;
       });

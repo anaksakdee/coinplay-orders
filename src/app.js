@@ -107,7 +107,8 @@ function newDca(){
   return { enabled:false, amount:0, intervalHours:24, lastRun:null };
 }
 function newAutoTrade(){
-  return { enabled:false, buyAmount:0, lastBuyAt:null };
+  // roundTrips/btcAccumulated = ผลงานจริงของระบบตามเป้าหมาย "ได้จำนวน BTC เพิ่มขึ้น" (ไม่ใช่กำไรเป็นเงิน)
+  return { enabled:false, buyAmount:0, lastBuyAt:null, roundTrips:0, btcAccumulated:0 };
 }
 
 function newLedger(startingCash){
@@ -786,7 +787,11 @@ function saveAutoTrade(){
   var enabled = document.getElementById('auto-trade-enabled').checked;
   var buyAmount = parseFloat(document.getElementById('auto-trade-amount').value)||0;
   if (enabled && buyAmount<=0) return;
-  acc.autoTrade = { enabled: enabled, buyAmount: buyAmount, lastBuyAt: (acc.autoTrade && acc.autoTrade.lastBuyAt) || null };
+  var prevAuto = acc.autoTrade || newAutoTrade();
+  acc.autoTrade = {
+    enabled: enabled, buyAmount: buyAmount, lastBuyAt: prevAuto.lastBuyAt || null,
+    roundTrips: prevAuto.roundTrips || 0, btcAccumulated: prevAuto.btcAccumulated || 0
+  };
   var updateObj = {};
   updateObj[LEDGER_KEY[activeExchange]+'.autoTrade'] = acc.autoTrade;
   updateDoc(doc(db,'users',currentUid), updateObj).catch(function(err){ console.error('saveAutoTrade failed', err); });
@@ -809,6 +814,20 @@ function renderAutoTradePanel(){
   } else {
     var lastBuyStr = at.lastBuyAt ? new Date(at.lastBuyAt).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'ยังไม่เคยซื้อ';
     statusEl.textContent = 'เปิดใช้งานอยู่ — ซื้อครั้งละ '+fmtMkt(at.buyAmount,0)+' เมื่อสัญญาณบ่งชี้จุดซื้อ (ห่างกันอย่างน้อย 1 ชม./ครั้ง) · ขายทำกำไร 2%/รอบ หรือตัดขาดทุนเฉพาะตอนจำเป็นจริงๆ (ขาดทุนหนัก 5% + สัญญาณยืนยันขาลง) · ซื้อล่าสุด: '+lastBuyStr;
+  }
+
+  // ป้ายคะแนนตามเป้าหมายจริงของระบบ: ได้จำนวน BTC เพิ่มขึ้นเท่าไหร่จากการเทรดครบวง (ไม่ใช่กำไรเป็นเงิน)
+  var scoreEl = document.getElementById('auto-trade-score');
+  if (scoreEl){
+    var trips = at.roundTrips || 0;
+    var gained = at.btcAccumulated || 0;
+    if (!trips){
+      scoreEl.innerHTML = '<b>ผลสะสม BTC จากออโต้เทรด:</b> ยังไม่มีรอบเทรดที่ครบวง (นับเมื่อ "ขายแล้วซื้อคืนสำเร็จ" 1 รอบ)';
+    } else {
+      var sign = gained>=0 ? '+' : '';
+      var col = gained>0 ? 'var(--up)' : gained<0 ? 'var(--down)' : '';
+      scoreEl.innerHTML = '<b>ผลสะสม BTC จากออโต้เทรด:</b> <span style="color:'+col+'">'+sign+gained.toFixed(8)+' BTC</span> จาก '+trips+' รอบที่ครบวง (ขาย→ซื้อคืน)';
+    }
   }
 
   if (!sigEl) return;
