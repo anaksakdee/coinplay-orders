@@ -43,14 +43,25 @@ async function fetchBitkubPrice() {
 }
 
 async function fetchBinanceCandles() {
+  // api.binance.com บล็อก IP ของ GitHub Actions runner (HTTP 451) เหมือนกับ endpoint ราคา
+  // ลอง Binance ก่อน แล้วสำรองด้วยแท่งเทียน 1 นาทีจาก Coinbase Exchange (public, ไม่บล็อก, granularity ตรงกัน)
   try {
     const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${KLINE_LIMIT}`);
     if (!res.ok) throw new Error("binance klines http " + res.status);
     const data = await res.json();
     return data.map((k) => ({ t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]) }));
   } catch (err) {
-    console.warn("binance klines fetch failed (likely geo-block), auto-trade signal unavailable this run:", err.message);
-    return null;
+    console.warn("binance klines fetch failed, falling back to Coinbase:", err.message);
+    try {
+      const res2 = await fetch("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60");
+      if (!res2.ok) throw new Error("coinbase candles http " + res2.status);
+      const data2 = await res2.json(); // [ [time, low, high, open, close, volume], ... ] ใหม่สุดก่อน
+      const candles = data2.map((k) => ({ t: k[0] * 1000, o: k[3], h: k[2], l: k[1], c: k[4] })).reverse();
+      return candles.slice(-KLINE_LIMIT);
+    } catch (err2) {
+      console.error("coinbase candles fallback also failed, auto-trade signal unavailable this run:", err2.message);
+      return null;
+    }
   }
 }
 
