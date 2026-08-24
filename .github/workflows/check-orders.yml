@@ -1,4 +1,4 @@
-name: Check pending orders
+name: Check pending orders & DCA
 
 on:
   schedule:

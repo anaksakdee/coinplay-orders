@@ -28,7 +28,7 @@ var sessionTrades = 0;
 
 // บัญชีเทรดจำลองแยกกันคนละสกุลเงินต่อตลาด — Binance ใช้เงินดอลลาร์ (USD), Bitkub ใช้เงินบาท (THB)
 var LEDGER_KEY = { binance:'usd', bitkub:'thb' };
-var STARTING_BALANCE = { binance:10000, bitkub:100000 };
+var STARTING_BALANCE = { binance:300, bitkub:3000 };
 var FEE_RATES = { binance:0.001, bitkub:0.0025 }; // Binance 0.10% มาตรฐาน, Bitkub 0.25% มาตรฐาน (ไม่รวมส่วนลด)
 var QUICK_AMTS = { binance:[100,500,1000], bitkub:[5000,20000,50000] };
 var TOPUP_QUICK = { binance:[1000,5000,10000], bitkub:[10000,50000,100000] };
@@ -99,8 +99,14 @@ document.getElementById('btn-acknowledge').addEventListener('click', function(){
   enterApp();
 });
 
+var DCA_DEFAULT_AMT = { binance:20, bitkub:500 };
+
+function newDca(){
+  return { enabled:false, amount:0, intervalHours:24, lastRun:null };
+}
+
 function newLedger(startingCash){
-  return { cash: startingCash, btc: 0, avgEntry: 0, lots: [], orders: [] };
+  return { cash: startingCash, btc: 0, avgEntry: 0, lots: [], orders: [], dca: newDca() };
 }
 
 function ensureUserDoc(user){
@@ -123,6 +129,8 @@ function ensureUserDoc(user){
       }
       if (!currentAccount.usd.orders) currentAccount.usd.orders = [];
       if (!currentAccount.thb.orders) currentAccount.thb.orders = [];
+      if (!currentAccount.usd.dca) currentAccount.usd.dca = newDca();
+      if (!currentAccount.thb.dca) currentAccount.thb.dca = newDca();
       return writeLog('login', {});
     } else {
       currentAccount = {
@@ -227,7 +235,7 @@ function updateExchangeUI(){
   document.getElementById('fee-note').textContent = 'คิดค่าธรรมเนียม '+(activeFeeRate()*100).toFixed(2)+'% ต่อคำสั่ง (เท่ากับอัตรามาตรฐานของ'+(activeExchange==='bitkub'?'Bitkub':'Binance')+') หักจากเงินสดอัตโนมัติทุกครั้งที่ซื้อ/ขาย';
   document.getElementById('topup-note').textContent = 'เป็นเงินจำลองสำหรับฝึกเทรดเท่านั้น ไม่ใช่เงินจริง เติมได้ไม่จำกัดจำนวนครั้ง แต่ละครั้งไม่เกิน '+fmtMkt(TOPUP_CAP[activeExchange],0)+' การเติมเงินจะถูกบันทึกไว้เพื่อการวิเคราะห์เช่นกัน';
 
-  if (currentAccount){ renderAccount(); renderHistory(); renderPendingOrders(); }
+  if (currentAccount){ renderAccount(); renderHistory(); renderPendingOrders(); renderDcaPanel(); }
   if (marketStarted){ renderTradePoints(); renderSellPlan(); }
 }
 
@@ -689,17 +697,63 @@ function doReset(){
   if (!currentAccount || tradeBusy) return;
   var acc = ledger();
   var starting = STARTING_BALANCE[activeExchange];
-  acc.cash = starting; acc.btc = 0; acc.avgEntry = 0; acc.lots = []; acc.orders = [];
+  acc.cash = starting; acc.btc = 0; acc.avgEntry = 0; acc.lots = []; acc.orders = []; acc.dca = newDca();
   var updatePath = LEDGER_KEY[activeExchange];
   var updateObj = {};
-  updateObj[updatePath] = { cash: starting, btc: 0, avgEntry: 0, lots: [], orders: [] };
+  updateObj[updatePath] = { cash: starting, btc: 0, avgEntry: 0, lots: [], orders: [], dca: newDca() };
 
   tradeBusy = true; setBusy(true);
   updateDoc(doc(db,'users',currentUid), updateObj)
     .then(function(){ return writeLog('reset_account', { market: activeExchange }); })
     .catch(function(err){ console.error('reset failed', err); })
-    .finally(function(){ tradeBusy=false; setBusy(false); renderAccount(); renderSellPlan(); renderPendingOrders(); });
+    .finally(function(){ tradeBusy=false; setBusy(false); renderAccount(); renderSellPlan(); renderPendingOrders(); renderDcaPanel(); });
 }
+
+/* ---------------- DCA อัตโนมัติ (ซื้อ BTC จำนวนคงที่ตามรอบเวลา เพื่อเก็บสะสม) ---------------- */
+// การยิงคำสั่งจริงทำที่ฝั่งเซิร์ฟเวอร์ (GitHub Actions cron รันทุก ~5 นาที ผ่าน Firebase Admin SDK)
+// เพื่อให้ทำงานได้แม้ไม่เปิดหน้านี้ค้างไว้ — ฝั่งนี้มีหน้าที่แค่บันทึก/แสดงการตั้งค่าเท่านั้น
+function saveDca(){
+  if (!currentAccount || !currentUid) return;
+  var acc = ledger();
+  var enabled = document.getElementById('dca-enabled').checked;
+  var amount = parseFloat(document.getElementById('dca-amount').value)||0;
+  var intervalHours = parseFloat(document.getElementById('dca-interval').value)||24;
+  if (enabled && amount<=0) return;
+  acc.dca = { enabled: enabled, amount: amount, intervalHours: intervalHours, lastRun: (acc.dca && acc.dca.lastRun) || null };
+  var updateObj = {};
+  updateObj[LEDGER_KEY[activeExchange]+'.dca'] = acc.dca;
+  updateDoc(doc(db,'users',currentUid), updateObj).catch(function(err){ console.error('saveDca failed', err); });
+  writeLog('dca_settings_saved', { market:activeExchange, enabled:enabled, amount: Math.round(amount*100)/100, intervalHours: intervalHours });
+  renderDcaPanel();
+}
+
+function intervalLabel(hours){
+  if (hours>=168 && hours%168===0) return 'ทุก '+(hours/168)+' สัปดาห์';
+  if (hours>=24 && hours%24===0) return 'ทุก '+(hours/24)+' วัน';
+  return 'ทุก '+hours+' ชั่วโมง';
+}
+
+function renderDcaPanel(){
+  var enabledEl = document.getElementById('dca-enabled');
+  if (!enabledEl) return;
+  var acc = ledger();
+  var dca = (acc && acc.dca) || newDca();
+  enabledEl.checked = !!dca.enabled;
+  document.getElementById('dca-amount').value = dca.amount || DCA_DEFAULT_AMT[activeExchange];
+  document.getElementById('dca-interval').value = String(dca.intervalHours || 24);
+
+  var statusEl = document.getElementById('dca-status');
+  if (!dca.enabled){
+    statusEl.textContent = 'ยังไม่ได้เปิดใช้งาน — เปิดแล้วระบบจะซื้อ BTC ให้อัตโนมัติตามจำนวนเงินและรอบเวลาที่ตั้งไว้ ทำงานฝั่งเซิร์ฟเวอร์ (เช็คทุก ~5 นาที) ให้แม้ไม่เปิดหน้านี้ค้างไว้ก็ตาม';
+  } else {
+    var next = dca.lastRun ? dca.lastRun + dca.intervalHours*3600*1000 : Date.now();
+    var nextStr = next<=Date.now() ? 'รอบถัดไปภายใน ~5 นาที' : new Date(next).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+    var lastStr = dca.lastRun ? new Date(dca.lastRun).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'ยังไม่เคยทำงาน';
+    statusEl.textContent = 'เปิดใช้งานอยู่ — ซื้อ '+fmtMkt(dca.amount,0)+' '+intervalLabel(dca.intervalHours)+' · ทำงานล่าสุด: '+lastStr+' · '+nextStr;
+  }
+}
+
+document.getElementById('btn-save-dca').addEventListener('click', saveDca);
 
 /* ---------------- คำสั่งรอราคา (auto — ทำงานเฉพาะตอนเปิดหน้านี้ค้างไว้) ---------------- */
 function createOrder(side, targetPrice, amount){

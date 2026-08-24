@@ -158,6 +158,95 @@ async function processMarket(db, market, price) {
   }
 }
 
+// ออโต้เทรด DCA — ซื้อ BTC จำนวนคงที่ตามรอบเวลาที่ผู้ใช้ตั้งไว้ ไม่สนราคาขึ้นลง (เก็บสะสม BTC ระยะยาว)
+async function processDCA(db, market, price) {
+  if (!price) {
+    console.log(`[dca:${market}] no price available, skipping`);
+    return;
+  }
+  const feeRate = FEE_RATES[market];
+  const ledgerKey = LEDGER_KEY[market];
+  const usersSnap = await db.collection("users").get();
+  const now = Date.now();
+  let count = 0;
+
+  for (const userDoc of usersSnap.docs) {
+    const uid = userDoc.id;
+    const data = userDoc.data();
+    const ledger = data[ledgerKey];
+    const dca = ledger && ledger.dca;
+    if (!dca || !dca.enabled || !(dca.amount > 0)) continue;
+    const intervalMs = (dca.intervalHours || 24) * 3600 * 1000;
+    const last = dca.lastRun || 0;
+    if (now - last < intervalMs) continue;
+
+    const userRef = db.collection("users").doc(uid);
+    try {
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(userRef);
+        const fresh = snap.data();
+        const freshLedger = fresh[ledgerKey];
+        const freshDca = freshLedger && freshLedger.dca;
+        if (!freshDca || !freshDca.enabled || !(freshDca.amount > 0)) return;
+        const freshLast = freshDca.lastRun || 0;
+        if (now - freshLast < intervalMs) return; // อีก instance ทำไปแล้ว
+
+        const result = applyTrade(freshLedger, "buy", freshDca.amount, price, feeRate);
+        const newDca = { enabled: freshDca.enabled, amount: freshDca.amount, intervalHours: freshDca.intervalHours, lastRun: now };
+        if (!result) {
+          // เงินไม่พอตอนนี้ ข้ามรอบนี้ไปก่อน แต่อัปเดต lastRun กันไม่ให้เช็คซ้ำถี่เกิน
+          tx.update(userRef, { [`${ledgerKey}.dca`]: newDca });
+          return;
+        }
+
+        const equity = result.ledger.cash + result.ledger.btc * price;
+        tx.update(userRef, {
+          [`${ledgerKey}.cash`]: result.ledger.cash,
+          [`${ledgerKey}.btc`]: result.ledger.btc,
+          [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
+          [`${ledgerKey}.lots`]: result.ledger.lots,
+          [`${ledgerKey}.dca`]: newDca,
+        });
+
+        const tradeRef = db.collection("trades").doc();
+        tx.set(tradeRef, {
+          uid,
+          email: fresh.email || null,
+          market,
+          ccy: ledgerKey,
+          side: "buy",
+          price,
+          qty: result.qty,
+          usd: result.amount,
+          fee: result.fee,
+          equityAfter: equity,
+          dca: true,
+          ts: Timestamp.now(),
+        });
+
+        const logRef = db.collection("logs").doc();
+        tx.set(logRef, {
+          uid,
+          email: fresh.email || null,
+          type: "dca_triggered",
+          detail: {
+            market,
+            amount: Math.round(result.amount * 100) / 100,
+            intervalHours: freshDca.intervalHours,
+            source: "background",
+          },
+          ts: Timestamp.now(),
+        });
+      });
+      count++;
+      console.log(`[dca:${market}] executed for user ${uid}`);
+    } catch (err) {
+      console.error(`[dca:${market}] failed for user ${uid}:`, err.message);
+    }
+  }
+  console.log(`[dca:${market}] done, ${count} executed`);
+}
+
 async function main() {
   const app = initializeApp({ credential: cert(getServiceAccount()) });
   const db = getFirestore(app);
@@ -169,6 +258,8 @@ async function main() {
 
   await processMarket(db, "binance", binancePrice);
   await processMarket(db, "bitkub", bitkubPrice);
+  await processDCA(db, "binance", binancePrice);
+  await processDCA(db, "bitkub", bitkubPrice);
 
   console.log("done");
 }
