@@ -138,3 +138,112 @@ for (const t of [{n:"ไม่มี timeout",v:Infinity},{n:"72 ชม.",v:72},
   const per = wins.map((w) => run(w.c, w.a, 0.5, t.v));
   console.log(t.n.padEnd(16) + per.map((x,i)=>`ปี${i+1}(${wins[i].chg>=0?"+":""}${wins[i].chg.toFixed(0)}%): ${x.vsHold>=0?"+":""}${x.vsHold.toFixed(1)}%`.padStart(22)).join(""));
 }
+
+console.log("\n\n===== ตรวจว่าตัววัดตรงกับเป้าหมาย 'จำนวนเหรียญที่ถือจริง' ไหม =====");
+console.log("A = นับเงินสดเป็น BTC ด้วย (ที่ใช้วัดมาตลอด) | B = นับเฉพาะเหรียญที่ถืออยู่จริง");
+console.log("ขนาด".padEnd(8) + "A เทียบถือเฉยๆ".padStart(18) + "B เทียบถือเฉยๆ".padStart(18) + "  เงินสดค้างตอนจบ");
+for (const sz of [0.2, 0.5, 1.0]) {
+  const per = wins.map((w) => {
+    const r = run(w.c, w.a, sz);
+    return r;
+  });
+  // รันใหม่แบบเก็บสถานะจบ เพื่อดูจำนวนเหรียญจริง
+  const detail = wins.map((w) => {
+    let cash = 0, btc = (300 / (1 + FEE)) / w.c[WARMUP].c;
+    let pend = null;
+    const atr = w.a;
+    for (let i = WARMUP; i < w.c.length; i++) {
+      const c = w.c[i], a = atr[i];
+      if (!a) continue;
+      if (pend && c.l <= pend.target) {
+        const spend = Math.min(pend.cash, cash);
+        if (spend > 5) { btc += (spend / (1 + FEE)) / pend.target; cash -= spend; }
+        pend = null;
+      }
+      const body = c.c - c.o, bp = Math.abs(body) / c.c * 100;
+      if (!(Math.abs(body) > ATR_MULT * a && bp >= MIN_BODY)) continue;
+      if (body <= 0 || pend) continue;
+      const q = btc * sz;
+      if (q * c.c <= 5) continue;
+      const pr = q * c.c * (1 - FEE);
+      cash += pr; btc -= q;
+      pend = { target: c.c - RETRACE * body, cash: pr, at: i };
+    }
+    const last = w.c[w.c.length - 1].c;
+    const hold = 300 / w.c[WARMUP].c;
+    return {
+      a: ((cash + btc * last) / last / hold - 1) * 100,
+      b: (btc / hold - 1) * 100,
+      cashPct: cash / (cash + btc * last) * 100,
+    };
+  });
+  const avgA = detail.reduce((x, y) => x + y.a, 0) / detail.length;
+  const avgB = detail.reduce((x, y) => x + y.b, 0) / detail.length;
+  const avgCash = detail.reduce((x, y) => x + y.cashPct, 0) / detail.length;
+  console.log(`${(sz*100).toFixed(0)}%`.padEnd(8) + `${avgA>=0?"+":""}${avgA.toFixed(2)}%`.padStart(18) + `${avgB>=0?"+":""}${avgB.toFixed(2)}%`.padStart(18) + `${avgCash.toFixed(1)}%`.padStart(18));
+}
+
+console.log("\n===== สาเหตุ: เงินจมเป็นเงินสด 'กี่ % ของเวลา' ระหว่างรอซื้อคืน =====");
+for (const sz of [0.2, 0.5, 1.0]) {
+  const d = wins.map((w) => {
+    let cash = 0, btc = (300 / (1 + FEE)) / w.c[WARMUP].c;
+    let pend = null, barsPending = 0, bars = 0, sumCashFrac = 0;
+    for (let i = WARMUP; i < w.c.length; i++) {
+      const c = w.c[i], a = w.a[i];
+      if (!a) continue;
+      bars++;
+      if (pend) barsPending++;
+      sumCashFrac += cash / (cash + btc * c.c);
+      if (pend && c.l <= pend.target) {
+        const sp = Math.min(pend.cash, cash);
+        if (sp > 5) { btc += (sp / (1 + FEE)) / pend.target; cash -= sp; }
+        pend = null;
+      }
+      const body = c.c - c.o, bp = Math.abs(body) / c.c * 100;
+      if (!(Math.abs(body) > ATR_MULT * a && bp >= MIN_BODY)) continue;
+      if (body <= 0 || pend) continue;
+      const q = btc * sz;
+      if (q * c.c <= 5) continue;
+      const pr = q * c.c * (1 - FEE);
+      cash += pr; btc -= q;
+      pend = { target: c.c - RETRACE * body, cash: pr, at: i };
+    }
+    return { pendPct: barsPending / bars * 100, cashPct: sumCashFrac / bars * 100 };
+  });
+  const p = d.reduce((a, x) => a + x.pendPct, 0) / d.length;
+  const cp = d.reduce((a, x) => a + x.cashPct, 0) / d.length;
+  console.log(`  ขนาด ${(sz*100).toFixed(0)}%  ->  มีคำสั่งค้างอยู่ ${p.toFixed(1)}% ของเวลา | เงินอยู่ในรูปเงินสดเฉลี่ย ${cp.toFixed(1)}% ของพอร์ตตลอดเวลา`);
+}
+
+console.log("\n===== วัดให้ถูก: รันยาว 5 ปีต่อเนื่อง นับเหรียญตอนที่ 'ไม่มีคำสั่งค้าง' =====");
+const atrAll = atrSeries(all, 14);
+for (const sz of [0.2, 0.3, 0.5, 0.8, 1.0]) {
+  let cash = 0, btc = (300 / (1 + FEE)) / all[WARMUP].c;
+  const hold = 300 / all[WARMUP].c;
+  let pend = null, cycles = 0, coinsFromCycles = 0;
+  let lastFlatBtc = btc, lastFlatIdx = WARMUP;
+  for (let i = WARMUP; i < all.length; i++) {
+    const c = all[i], a = atrAll[i];
+    if (!a) continue;
+    if (pend && c.l <= pend.target) {
+      const sp = Math.min(pend.cash, cash);
+      if (sp > 5) {
+        const got = (sp / (1 + FEE)) / pend.target;
+        btc += got; cash -= sp;
+        coinsFromCycles += got - pend.qtySold; cycles++;
+      }
+      pend = null;
+      lastFlatBtc = btc; lastFlatIdx = i;      // จุดที่ไม่มีคำสั่งค้าง = วัดเหรียญได้ตรง
+    }
+    const body = c.c - c.o, bp = Math.abs(body) / c.c * 100;
+    if (!(Math.abs(body) > ATR_MULT * a && bp >= MIN_BODY)) continue;
+    if (body <= 0 || pend) continue;
+    const q = btc * sz;
+    if (q * c.c <= 5) continue;
+    const pr = q * c.c * (1 - FEE);
+    cash += pr; btc -= q;
+    pend = { target: c.c - RETRACE * body, cash: pr, at: i, qtySold: q };
+  }
+  const openAtEnd = pend ? "ใช่" : "ไม่";
+  console.log(`  ขนาด ${String((sz*100).toFixed(0)).padStart(3)}%  ->  ปิดรอบได้ ${String(cycles).padStart(2)} รอบ | เหรียญที่ได้เพิ่มจากการหมุนรอบ ${coinsFromCycles>=0?"+":""}${(coinsFromCycles/hold*100).toFixed(2)}% | เหรียญ ณ จุดปิดรอบล่าสุด ${((lastFlatBtc/hold-1)*100)>=0?"+":""}${((lastFlatBtc/hold-1)*100).toFixed(2)}% เทียบถือเฉยๆ | ค้างตอนจบ: ${openAtEnd}`);
+}
