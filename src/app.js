@@ -195,7 +195,15 @@ function loadTradeHistory(){
 /* ---------------- real market data (Binance public API, or Bitkub via proxy) ---------------- */
 var SYMBOL = 'btcusdt';
 var KLINE_LIMIT = 120;
-var timeframe = '1m';
+var TF_STORAGE_KEY = 'coinplay-timeframe';
+var VALID_TFS = ['1m','5m','15m','1h'];
+function loadSavedTimeframe(){
+  try {
+    var v = localStorage.getItem(TF_STORAGE_KEY);
+    return VALID_TFS.indexOf(v)>=0 ? v : '1m';
+  } catch(e){ return '1m'; }
+}
+var timeframe = loadSavedTimeframe();
 var activeExchange = 'binance'; // 'binance' | 'bitkub'
 var price = null;
 var dayHigh = null, dayLow = null, dayChangePct = 0, dayVolumeBase = 0;
@@ -1198,8 +1206,17 @@ function startMarket(){
   startActiveExchangeFeed();
 }
 
+function renderTfButtons(){
+  document.querySelectorAll('.tf-btn').forEach(function(btn){
+    btn.classList.toggle('active', btn.getAttribute('data-tf')===timeframe);
+  });
+}
+
 function changeTimeframe(tf){
+  if (tf===timeframe) return;
   timeframe = tf;
+  try { localStorage.setItem(TF_STORAGE_KEY, tf); } catch(e){}
+  renderTfButtons();
   price = null;
   if (activeExchange==='binance'){
     loadHistory(tf).then(function(){
@@ -1239,7 +1256,11 @@ document.getElementById('btn-buy').addEventListener('click', function(){ doTrade
 document.getElementById('btn-sell').addEventListener('click', function(){ doTrade('sell', document.getElementById('amt-input').value); });
 document.getElementById('btn-topup').addEventListener('click', function(){ doTopup(document.getElementById('topup-input').value); });
 document.getElementById('btn-reset').addEventListener('click', doReset);
-document.getElementById('speed').addEventListener('change', function(e){ changeTimeframe(e.target.value); });
+renderTfButtons();
+document.getElementById('tf-group').addEventListener('click', function(e){
+  var btn = e.target.closest('.tf-btn');
+  if (btn) changeTimeframe(btn.getAttribute('data-tf'));
+});
 document.querySelectorAll('.exchange-tab').forEach(function(btn){
   btn.addEventListener('click', function(){ switchExchange(btn.getAttribute('data-exchange')); });
 });
