@@ -61,7 +61,10 @@ const WEIGHTS = {
   rangePos: 0.7,    // ตำแหน่งในกรอบราคา
 };
 
-export function scoreMarket(price, candles, returns) {
+// learned = ผลจาก evaluateIndicators() (shared/backtest.mjs) — ถ้าส่งมาจะปรับน้ำหนักตามที่วัดได้จริงจากอดีต
+export function scoreMarket(price, candles, returns, learned) {
+  const lw = (learned && learned.indicators) || null;
+  const wOf = (key) => WEIGHTS[key] * (lw && lw[key] ? lw[key].weightMultiplier : 1);
   const sig = computeSignal(price, candles, returns);
   const atr = computeATR(candles, 14);
   const pctB = computePercentB(price, sig.bb);
@@ -74,7 +77,7 @@ export function scoreMarket(price, candles, returns) {
     const gapPct = sig.emaSlow ? (sig.emaFast - sig.emaSlow) / sig.emaSlow * 100 : 0;
     const s = Math.max(-100, Math.min(100, gapPct * 60));
     parts.push({
-      key: "trend", weight: WEIGHTS.trend, score: s,
+      key: "trend", weight: wOf("trend"), score: s,
       text: `EMA9 ${sig.trendUp ? "อยู่เหนือ" : "อยู่ใต้"} EMA21 (ห่างกัน ${gapPct.toFixed(3)}%) — แนวโน้มระยะสั้นเป็น${sig.trendUp ? "ขาขึ้น" : "ขาลง"}`,
     });
   }
@@ -83,7 +86,7 @@ export function scoreMarket(price, candles, returns) {
     const norm = price ? sig.macd.histogram / price * 100 : 0;
     const s = Math.max(-100, Math.min(100, norm * 400));
     parts.push({
-      key: "macd", weight: WEIGHTS.macd, score: s,
+      key: "macd", weight: wOf("macd"), score: s,
       text: `MACD histogram ${sig.macd.histogram.toFixed(2)} (${sig.macd.histogram >= 0 ? "บวก" : "ลบ"}) — โมเมนตัมเชิงแนวโน้ม${sig.macd.histogram >= 0 ? "หนุนขาขึ้น" : "กดดันขาลง"}`,
     });
   }
@@ -95,7 +98,7 @@ export function scoreMarket(price, candles, returns) {
     if (sig.rsi < 30) zone = "โซนขายมากเกินไป (oversold)";
     else if (sig.rsi > 70) zone = "โซนซื้อมากเกินไป (overbought)";
     parts.push({
-      key: "rsi", weight: WEIGHTS.rsi, score: s,
+      key: "rsi", weight: wOf("rsi"), score: s,
       text: `RSI(14) = ${sig.rsi.toFixed(1)} อยู่ใน${zone}`,
     });
   }
@@ -107,7 +110,7 @@ export function scoreMarket(price, candles, returns) {
     if (pctB <= 0.1) where = "ชนกรอบล่าง (ราคาถูกผิดปกติเทียบสถิติ)";
     else if (pctB >= 0.9) where = "ชนกรอบบน (ราคาแพงผิดปกติเทียบสถิติ)";
     parts.push({
-      key: "meanRevert", weight: WEIGHTS.meanRevert, score: s,
+      key: "meanRevert", weight: wOf("meanRevert"), score: s,
       text: `Bollinger %B = ${pctB.toFixed(2)} — ราคา${where}`,
     });
   }
@@ -115,7 +118,7 @@ export function scoreMarket(price, candles, returns) {
   if (sig.forecast) {
     const s = Math.max(-100, Math.min(100, (sig.forecast.probUp - 0.5) * 300));
     parts.push({
-      key: "forecast", weight: WEIGHTS.forecast, score: s,
+      key: "forecast", weight: wOf("forecast"), score: s,
       text: `Monte Carlo ประเมินโอกาสราคาขึ้น ${Math.round(sig.forecast.probUp * 100)}% ใน 20 แท่งข้างหน้า`,
     });
   }
@@ -123,7 +126,7 @@ export function scoreMarket(price, candles, returns) {
   if (roc != null) {
     const s = Math.max(-100, Math.min(100, roc * 25));
     parts.push({
-      key: "momentum", weight: WEIGHTS.momentum, score: s,
+      key: "momentum", weight: wOf("momentum"), score: s,
       text: `ราคาเปลี่ยน ${roc >= 0 ? "+" : ""}${roc.toFixed(2)}% ใน 10 แท่งล่าสุด (โมเมนตัม)`,
     });
   }
@@ -132,7 +135,7 @@ export function scoreMarket(price, candles, returns) {
     // อยู่ใกล้ฐานของกรอบ = น่าซื้อ, ใกล้ยอด = ระวัง
     const s = Math.max(-100, Math.min(100, (0.5 - range.position) * 160));
     parts.push({
-      key: "rangePos", weight: WEIGHTS.rangePos, score: s,
+      key: "rangePos", weight: wOf("rangePos"), score: s,
       text: `ราคาอยู่ที่ ${Math.round(range.position * 100)}% ของกรอบ 60 แท่ง (ต่ำสุด ${range.low.toFixed(0)} / สูงสุด ${range.high.toFixed(0)})`,
     });
   }

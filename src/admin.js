@@ -208,6 +208,15 @@ function renderDecisions(logs){
       '</div>' +
       '<div class="dec-reason">'+esc(d.reason||'')+'</div>' +
       (inds ? '<details class="dec-details"><summary>ดูรายละเอียดอินดิเคเตอร์ '+(m.indicators||[]).length+' ตัว</summary><div class="ind-list">'+inds+'</div></details>' : '') +
+      (m.learning ? '<details class="dec-details"><summary>ผลเรียนรู้จากข้อมูลย้อนหลัง ('+m.learning.samples+' จุด)</summary><div class="ind-list">' +
+        Object.keys(m.learning.indicators||{}).map(function(k){
+          var v = m.learning.indicators[k];
+          var hr = v.hitRate;
+          var cls = hr==null ? '' : hr>52 ? 'ind-pos' : hr<48 ? 'ind-neg' : '';
+          return '<div class="ind-row"><span class="ind-name">'+esc(k)+'</span>' +
+                 '<span class="ind-score '+cls+'">'+esc(hr==null?'—':hr+'%')+'</span>' +
+                 '<span class="ind-note">ทายถูก '+esc(hr==null?'ไม่พอข้อมูล':hr+'% จาก '+v.samples+' จุด')+' → ปรับน้ำหนัก x'+esc(String(v.weightMultiplier))+'</span></div>';
+        }).join('') + '</div></details>' : '') +
       (extras ? '<div class="dec-chips">'+extras+'</div>' : '') +
     '</div>';
   }).join('');

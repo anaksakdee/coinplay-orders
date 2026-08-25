@@ -4,6 +4,7 @@ import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { computeReturns, computeSignal } from "../shared/signals.mjs";
 import { scoreMarket, describeScore, positionFraction, THRESHOLDS } from "../shared/strategy.mjs";
+import { evaluateIndicators, describeLearning } from "../shared/backtest.mjs";
 
 const FEE_RATES = { binance: 0.001, bitkub: 0.0025 };
 const LEDGER_KEY = { binance: "usd", bitkub: "thb" };
@@ -19,7 +20,7 @@ function btcAccumCeiling(sellPrice, feeRate, gain) {
   return (sellPrice * (1 - feeRate)) / ((1 + feeRate) * (1 + gain));
 }
 const AUTO_TRADE_BUY_COOLDOWN_MS = 60 * 60 * 1000; // ห่างกันอย่างน้อย 1 ชม.ต่อการซื้ออัตโนมัติ 1 ครั้ง กันซื้อรัวทุก 5 นาทีตอนราคานิ่งต่ำกว่าเป้า
-const KLINE_LIMIT = 120;
+const KLINE_LIMIT = 300; // ดึงย้อนหลังเยอะขึ้นเพื่อให้มีข้อมูลพอสำหรับประเมินอินดิเคเตอร์ย้อนหลัง (backtest)
 const CORE_BUY_INTERVAL_MS = 12 * 60 * 60 * 1000; // ขาสะสมระยะยาว: ทยอยซื้อทุก 12 ชั่วโมง
 const CORE_BUY_FRACTION = 0.10; // ใช้เงินสด 10% ต่อการสะสมระยะยาว 1 ครั้ง
 
@@ -369,11 +370,14 @@ async function processAutoTrade(db, market, price, candles) {
   const feeRate = FEE_RATES[market];
   const ledgerKey = LEDGER_KEY[market];
   const returns = computeReturns(candles);
-  const analysis = scoreMarket(price, candles, returns);
+  // เรียนรู้จากข้อมูลเก่าก่อน: วัดว่าอินดิเคเตอร์ตัวไหนเคยทายถูกจริงบนแท่งย้อนหลัง แล้วปรับน้ำหนักตามนั้น
+  const learned = evaluateIndicators(candles, 20, 60);
+  const analysis = scoreMarket(price, candles, returns, learned);
   const score = analysis.composite;
   const verdict = describeScore(score);
 
   console.log(`[auto:${market}] price=${price} score=${score.toFixed(1)} (${verdict}) atr%=${analysis.atrPct ? analysis.atrPct.toFixed(3) : "n/a"}`);
+  if (learned) console.log(`[auto:${market}] ${describeLearning(learned)}`);
 
   const usersSnap = await db.collection("users").get();
   const now = Date.now();
@@ -391,6 +395,7 @@ async function processAutoTrade(db, market, price, candles) {
       name: p.key, score: round2(p.score), weight: p.weight, note: p.text,
     })),
     legacyVotes: signalSummary(analysis.signal),
+    learning: learned ? { horizon: learned.horizon, samples: learned.samples, indicators: learned.indicators, summary: describeLearning(learned) } : null,
   };
 
   async function writeDecision(tx, uid, email, action, reasonText, extra) {
