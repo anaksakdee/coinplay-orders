@@ -37,6 +37,7 @@ const SPIKE_ATR_MULTIPLE = 1.5;  // ต้องยาวกว่าควา�
 // ทางสถิติโอกาสพลาดจริงยังอาจสูงถึง ~8.9% ถ้าเจอสปайค์ที่ไม่ย่อกลับตอนใช้ 100% = เหรียญหายยกก้อน
 // จึงเลือก 50% เป็นจุดสมดุล: ได้ผลตอบแทน ~2.8 เท่าของเดิม แต่ยังเหลือเหรียญอีกครึ่งไว้กันเหนียว
 const SPIKE_TRADE_PCT = 0.50;
+const SPIKE_MAX_OPEN = 3;        // เปิดรอบซื้อคืนพร้อมกันได้สูงสุด 3 รอบ (ให้เงินสดหมุนต่อ)
 const SPIKE_RETRACE = 0.20;      // ตั้งไม้สวนที่ 20% ของลำตัวไม้ — ตรึงไว้ ห้ามขยายให้ลึกกว่านี้ (ดูเหตุผลด้านล่าง)
 const SPIKE_FEE_SAFETY = 2.5;    // ส่วนต่างที่จะได้ ต้องมากกว่าค่าธรรมเนียมไป-กลับอย่างน้อยเท่านี้
 
@@ -655,7 +656,13 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
           if (!fa || !fa.enabled) return;
           if (!(fl.btc > 0)) return;
           // ถ้ามีคำสั่งซื้อคืนจากไม้ยาวรอบก่อนค้างอยู่ ไม่ต้องซ้อนอีก
-          if ((fl.orders || []).some((o) => o.spike)) return;
+          // เปิดรอบพร้อมกันได้หลายรอบ เพื่อให้เงินสดหมุนต่อ ไม่ใช่จมรอรอบเดียวจบ
+          // เดิมจำกัดไว้ 1 รอบ ทำให้สปайค์ถัดไปถูกข้ามทั้งหมดระหว่างรอซื้อคืน (เคยรอนานถึง 64 วัน)
+          // ทดสอบ 5 ปี: 1 รอบ -> ปิดได้ 32 รอบ เหรียญเพิ่ม +9.16%
+          //             3 รอบ -> ปิดได้ 86 รอบ เหรียญเพิ่ม +14.95%  <- เลือกอันนี้
+          //             5 รอบ -> ปิดได้ 89 รอบ เหรียญเพิ่ม +15.02% (เพิ่มขึ้นน้อยมาก ไม่คุ้มความซับซ้อน)
+          const openSpikes = (fl.orders || []).filter((o) => o.spike).length;
+          if (openSpikes >= SPIKE_MAX_OPEN) return;
 
           // คิด % จากเหรียญในขา swing เท่านั้น ไม่นับขา core ที่ตั้งใจถือยาว
           const swingBtc = (fl.lots || []).filter((l) => l.sleeve !== "core").reduce((a, l) => a + l.qty, 0);
@@ -674,7 +681,11 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
           const expectedGainPct = ((price * (1 - feeRate)) / (target * (1 + feeRate)) - 1) * 100;
           const order = {
             id: "spk" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            side: "buy", targetPrice: target, amount: round2(result.amount * (1 - feeRate)),
+            // ใช้ "เงินที่ได้จากการขายรอบนี้" พอดีเป๊ะ ไม่ไปดึงเงินสดก้อนอื่นมาเสริม
+            // เงินสดที่ได้จริง = result.amount*(1-fee) และตอนซื้อต้องกันค่าธรรมเนียมอีก (1+fee)
+            // จึงต้องหารด้วย (1+fee) ไม่งั้นจะใช้เงินเกินไปประมาณ 0.1% ของก้อนทุกรอบ
+            side: "buy", targetPrice: target,
+            amount: round2((result.amount * (1 - feeRate)) / (1 + feeRate)),
             createdAt: now, spike: true,
           };
           const equity = result.ledger.cash + result.ledger.btc * price;

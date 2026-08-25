@@ -247,3 +247,30 @@ for (const sz of [0.2, 0.3, 0.5, 0.8, 1.0]) {
   const openAtEnd = pend ? "ใช่" : "ไม่";
   console.log(`  ขนาด ${String((sz*100).toFixed(0)).padStart(3)}%  ->  ปิดรอบได้ ${String(cycles).padStart(2)} รอบ | เหรียญที่ได้เพิ่มจากการหมุนรอบ ${coinsFromCycles>=0?"+":""}${(coinsFromCycles/hold*100).toFixed(2)}% | เหรียญ ณ จุดปิดรอบล่าสุด ${((lastFlatBtc/hold-1)*100)>=0?"+":""}${((lastFlatBtc/hold-1)*100).toFixed(2)}% เทียบถือเฉยๆ | ค้างตอนจบ: ${openAtEnd}`);
 }
+
+console.log("\n===== เทียบ 50% (ปัจจุบัน) กับ 75% (ตามที่สั่ง) บน 5 ปีต่อเนื่อง =====");
+const atrA = atrSeries(all, 14);
+for (const sz of [0.5, 0.75, 0.8]) {
+  let cash = 0, btc = (300 / (1 + FEE)) / all[WARMUP].c;
+  const hold = 300 / all[WARMUP].c;
+  let pend = null, cycles = 0, gained = 0, barsPend = 0, bars = 0, lastFlat = btc;
+  for (let i = WARMUP; i < all.length; i++) {
+    const c = all[i], a = atrA[i];
+    if (!a) continue;
+    bars++; if (pend) barsPend++;
+    if (pend && c.l <= pend.target) {
+      const sp = Math.min(pend.cash, cash);
+      if (sp > 5) { const g = (sp / (1 + FEE)) / pend.target; btc += g; cash -= sp; gained += g - pend.qtySold; cycles++; }
+      pend = null; lastFlat = btc;
+    }
+    const body = c.c - c.o, bp = Math.abs(body) / c.c * 100;
+    if (!(Math.abs(body) > ATR_MULT * a && bp >= MIN_BODY)) continue;
+    if (body <= 0 || pend) continue;
+    const q = btc * sz;
+    if (q * c.c <= 5) continue;
+    const pr = q * c.c * (1 - FEE);
+    cash += pr; btc -= q;
+    pend = { target: c.c - RETRACE * body, cash: pr, at: i, qtySold: q };
+  }
+  console.log(`  ขาย ${(sz*100).toFixed(0)}%  ->  ปิดรอบ ${cycles} รอบ | เหรียญเพิ่ม ${(gained/hold*100)>=0?"+":""}${(gained/hold*100).toFixed(2)}% | เหรียญ ณ จุดปิดรอบล่าสุด ${((lastFlat/hold-1)*100)>=0?"+":""}${((lastFlat/hold-1)*100).toFixed(2)}% | เหรียญอยู่ในรูปเงินสด ${(barsPend/bars*sz*100).toFixed(1)}% ของเวลา`);
+}
