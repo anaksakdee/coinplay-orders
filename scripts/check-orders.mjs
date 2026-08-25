@@ -23,7 +23,7 @@ const BTC_ACCUM_TARGET = 0.0025;
 function btcAccumCeiling(sellPrice, feeRate, gain) {
   return (sellPrice * (1 - feeRate)) / ((1 + feeRate) * (1 + gain));
 }
-const KLINE_LIMIT = 900; // ดึงย้อนหลังเยอะพอทั้งสำหรับ backtest อินดิเคเตอร์ และรวมเป็นแท่ง 15 นาทีเพื่อหาไม้ยาว
+// (KLINE_LIMIT แท่ง 1 นาทีถูกลบไปแล้ว — ระบบใช้แท่ง 1 ชม.ล้วนตั้งแต่ scoreMarket ถึง spike detection)
 // ---------- กลยุทธ์ "เล่นเฉพาะไม้ยาว" (spike fade) ----------
 // ไม้เขียวยาว -> ขายบางส่วนรับรอบ แล้วตั้งซื้อคืนตอนราคาย่อกลับ
 // ไม้แดงยาว  -> ซื้อบางส่วนตอนดิ่ง แล้วตั้งขายตอนราคาเด้งกลับ
@@ -129,30 +129,7 @@ async function fetchBitkubPrice() {
   return data.THB_BTC ? data.THB_BTC.last : null;
 }
 
-async function fetchBinanceCandles() {
-  // api.binance.com บล็อก IP ของ GitHub Actions runner (HTTP 451) เหมือนกับ endpoint ราคา
-  // ลอง Binance ก่อน แล้วสำรองด้วยแท่งเทียน 1 นาทีจาก Coinbase Exchange (public, ไม่บล็อก, granularity ตรงกัน)
-  try {
-    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${KLINE_LIMIT}`);
-    if (!res.ok) throw new Error("binance klines http " + res.status);
-    const data = await res.json();
-    return data.map((k) => ({ t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5]) }));
-  } catch (err) {
-    console.warn("binance klines fetch failed, falling back to Coinbase:", err.message);
-    try {
-      const res2 = await fetch("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60");
-      if (!res2.ok) throw new Error("coinbase candles http " + res2.status);
-      const data2 = await res2.json(); // [ [time, low, high, open, close, volume], ... ] ใหม่สุดก่อน
-      const candles = data2.map((k) => ({ t: k[0] * 1000, o: k[3], h: k[2], l: k[1], c: k[4], v: k[5] })).reverse();
-      return candles.slice(-KLINE_LIMIT);
-    } catch (err2) {
-      console.error("coinbase candles fallback also failed, auto-trade signal unavailable this run:", err2.message);
-      return null;
-    }
-  }
-}
-
-// แท่ง 1 ชั่วโมงสำหรับหาไม้ยาวโดยเฉพาะ (คนละชุดกับแท่ง 1 นาทีที่ใช้คำนวณอินดิเคเตอร์)
+// แท่ง 1 ชม. เพียงชุดเดียว — ใช้ทั้งคำนวณคะแนนสัญญาณและหาไม้ยาว (ดูคอมเมนต์ที่ processAutoTrade)
 async function fetchBinanceSpikeCandles() {
   try {
     const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=${SPIKE_CANDLE_LIMIT}`);
@@ -167,7 +144,7 @@ async function fetchBinanceSpikeCandles() {
       const d = await res2.json();
       return d.map((k) => ({ t: k[0] * 1000, o: k[3], h: k[2], l: k[1], c: k[4], v: k[5] })).reverse();
     } catch (err2) {
-      console.error("spike candles unavailable this run:", err2.message);
+      console.error("hourly candles unavailable this run:", err2.message);
       return null;
     }
   }
@@ -183,20 +160,6 @@ async function fetchBitkubSpikeCandles() {
     return data.t.map((t, i) => ({ t: t * 1000, o: data.o[i], h: data.h[i], l: data.l[i], c: data.c[i], v: data.v ? data.v[i] : null }));
   } catch (err) {
     console.warn("bitkub 1h klines failed:", err.message);
-    return null;
-  }
-}
-
-async function fetchBitkubCandles() {
-  try {
-    const now = Math.floor(Date.now() / 1000);
-    const from = now - 60 * KLINE_LIMIT;
-    const res = await fetch(`https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=1&from=${from}&to=${now}`);
-    const data = await res.json();
-    if (!data || !data.c || !data.t) return null;
-    return data.t.map((t, i) => ({ t: t * 1000, o: data.o[i], h: data.h[i], l: data.l[i], c: data.c[i], v: data.v ? data.v[i] : null }));
-  } catch (err) {
-    console.warn("bitkub klines fetch failed, auto-trade signal unavailable this run:", err.message);
     return null;
   }
 }
@@ -502,8 +465,14 @@ function signalSummary(signal) {
 //   core  = สะสมระยะยาว ทยอยซื้อเก็บเรื่อยๆ ไม่ขายออกอัตโนมัติ (จำนวนเหรียญโตตามเวลา)
 //   swing = เทรดสั้น ขายตอนแพง ซื้อคืนตอนถูก โดยบังคับให้ซื้อคืนได้เหรียญมากกว่าที่ขายไปเสมอ
 // ทุกการตัดสินใจ (รวม "ไม่ทำอะไร") ถูกบันทึกลง logs พร้อมเหตุผลภาษาไทย ให้แอดมินย้อนอ่านและเอาไปปรับกลยุทธ์ได้
-async function processAutoTrade(db, market, price, candles, spikeCandles) {
-  if (!price || !candles || candles.length < 30) {
+// candles คือแท่ง 1 ชม. เพียงชุดเดียว — ใช้ทั้งคำนวณคะแนนสัญญาณ (RSI/EMA/MACD/ฯลฯ) และหาไม้ยาว
+// เดิมคะแนนสัญญาณคำนวณจากแท่ง 1 นาทีแยกต่างหาก ขณะที่ไม้ยาวดูจากแท่ง 1 ชม. — คนละกรอบเวลากัน
+// ทำให้ระบบ "กรองด้วยไม้ 1 ชม." แต่ "ตัดสินใจด้วยพฤติกรรมราคาในกรอบ 1 นาที" ซึ่งขัดกันเอง
+// ตามที่กำหนดไว้ว่าจะเทรดเฉพาะไม้ 1 ชม. ขึ้นไป จึงรวมให้ใช้แท่ง 1 ชม. เป็นแหล่งเดียวทั้งหมด
+// (ข้อดีเพิ่มเติม: ตรงกับที่ scripts/fulltest.mjs ใช้ทดสอบไว้พอดี เพราะตอนนั้นข้อมูล 1 นาทีย้อนหลัง
+// 5 ปีดึงไม่ไหว จึงทดสอบด้วยแท่ง 1 ชม. ทั้งคู่อยู่แล้ว — ผลตัวเลข +13.36% จึงตรงกับของจริงมากขึ้น)
+async function processAutoTrade(db, market, price, candles) {
+  if (!price || !candles || candles.length < 100) {
     console.log(`[auto:${market}] no price/candles, skipping`);
     return;
   }
@@ -517,7 +486,7 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
   const verdict = describeScore(score);
 
   // กลยุทธ์เล่นเฉพาะไม้ยาว: ตรวจแท่งล่าสุดว่าเป็นไม้ยาวพอจะเข้าเทรดไหม
-  const spike = detectSpike(spikeCandles, feeRate);
+  const spike = detectSpike(candles, feeRate);
 
   console.log(`[auto:${market}] price=${price} score=${score.toFixed(1)} (${verdict}) atr%=${analysis.atrPct ? analysis.atrPct.toFixed(3) : "n/a"}`);
   if (spike) {
@@ -903,7 +872,6 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
                 reason: `ถือไม้รอจังหวะ: มีไม้เทรดสั้นค้างอยู่ ${swingLots.length} ไม้ ระบบจะขายรับรอบก็ต่อเมื่อเจอไม้เขียวยาว (>=2.5% บนกราฟ 1 ชม.) หรือเข้าเงื่อนไขตัดขาดทุน ตอนนี้ราคา ${round2(price)} คะแนนรวม ${score.toFixed(1)} (${verdict}) ยังไม่เข้าเงื่อนไขขาย`,
                 market_analysis: marketSnapshot,
                 openSwingLots: swingLots.length,
-                distanceToTargetPct: round2(distPct),
               },
               ts: Timestamp.now(),
             });
@@ -923,11 +891,11 @@ async function main() {
   const app = initializeApp({ credential: cert(getServiceAccount()) });
   const db = getFirestore(app);
 
-  const [binancePrice, bitkubPrice, binanceCandles, bitkubCandles, binanceSpike, bitkubSpike] = await Promise.all([
+  // processMarket (คำสั่งรอราคาที่ตั้งไว้) เช็คกับ price ตรงๆ ไม่ต้องใช้แท่งเทียน
+  // จึงดึงแค่แท่ง 1 ชม. สำหรับ processAutoTrade เท่านั้น (ก่อนหน้านี้ยังดึงแท่ง 1 นาทีทิ้งไว้โดยไม่ได้ใช้)
+  const [binancePrice, bitkubPrice, binanceHourly, bitkubHourly] = await Promise.all([
     fetchBinancePrice().catch((e) => { console.error("binance price fetch failed", e.message); return null; }),
     fetchBitkubPrice().catch((e) => { console.error("bitkub price fetch failed", e.message); return null; }),
-    fetchBinanceCandles(),
-    fetchBitkubCandles(),
     fetchBinanceSpikeCandles(),
     fetchBitkubSpikeCandles(),
   ]);
@@ -936,8 +904,8 @@ async function main() {
   await processMarket(db, "bitkub", bitkubPrice);
   await processDCA(db, "binance", binancePrice);
   await processDCA(db, "bitkub", bitkubPrice);
-  await processAutoTrade(db, "binance", binancePrice, binanceCandles, binanceSpike);
-  await processAutoTrade(db, "bitkub", bitkubPrice, bitkubCandles, bitkubSpike);
+  await processAutoTrade(db, "binance", binancePrice, binanceHourly);
+  await processAutoTrade(db, "bitkub", bitkubPrice, bitkubHourly);
 
   console.log("done");
 }
