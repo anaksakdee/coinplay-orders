@@ -30,42 +30,30 @@ const KLINE_LIMIT = 900; // ดึงย้อนหลังเยอะพอ�
 // ไม้สั้น/ปกติ -> ไม่ทำอะไร (ไม่ไล่ซื้อระหว่างทาง)
 const SPIKE_ATR_MULTIPLE = 1.5;  // ต้องยาวกว่าความผันผวนปกติของช่วงนั้น
 const SPIKE_TRADE_PCT = 0.20;    // เทรดครั้งละ 20% ตามที่กำหนด
-const SPIKE_MIN_BODY_PCT = 2.5;  // ไม้ต้องยาวอย่างน้อยเท่านี้ (% ของราคา) ถึงจะนับเป็น "ไม้ยาว" ที่คุ้มเข้าเทรด
+const SPIKE_RETRACE = 0.20;      // ตั้งไม้สวนที่ 20% ของลำตัวไม้ — ตรึงไว้ ห้ามขยายให้ลึกกว่านี้ (ดูเหตุผลด้านล่าง)
 const SPIKE_FEE_SAFETY = 2.5;    // ส่วนต่างที่จะได้ ต้องมากกว่าค่าธรรมเนียมไป-กลับอย่างน้อยเท่านี้
 
-function spikeMinBodyPct() { return SPIKE_MIN_BODY_PCT; }
+function spikeRetrace() { return SPIKE_RETRACE; }
 
-// ระยะย่อที่จะตั้งไม้สวน (สัดส่วนของลำตัวไม้) — ปรับตามค่าธรรมเนียมของแต่ละตลาด
-// เหตุผล: กำไรที่ได้ ~ retrace x body ต้องชนะค่าธรรมเนียมไป-กลับ (~2 x feeRate)
-//   ตัวอย่างจริง: ไม้ 1% ย่อ 20% บน Binance ได้ 0.000% พอดี = เหนื่อยฟรี
-// ถ้าตรึง retrace ไว้ที่ 20% เท่ากันทั้งสองตลาด Bitkub (ค่าธรรมเนียมแพงกว่า 2.5 เท่า)
-// จะต้องรอไม้ยาวถึง 6.25% ซึ่งแทบไม่เกิดขึ้นจริง = กลยุทธ์ไม่ทำงานเลย
-// จึงให้ตลาดที่ค่าธรรมเนียมแพงกว่า "รอย่อลึกกว่า" แทน เกณฑ์ความยาวไม้จะได้เท่ากันที่ 2.5%
-//   Binance (0.10%) -> ย่อ 20% ตามที่กำหนดไว้เดิมพอดี
-//   Bitkub  (0.25%) -> ย่อ 50%
-function spikeRetrace(feeRate) {
-  return Math.min(0.6, (SPIKE_FEE_SAFETY * (2 * feeRate * 100)) / SPIKE_MIN_BODY_PCT);
+// ขนาดไม้ขั้นต่ำ (% ของราคา) ที่ทำให้รอบนี้คุ้มค่าธรรมเนียมจริง
+// กำไรต่อรอบ ~ retrace x body ต้องชนะค่าธรรมเนียมไป-กลับ (~2 x feeRate)
+//   Binance (0.10%) -> ต้องยาว >= 2.50%
+//   Bitkub  (0.25%) -> ต้องยาว >= 6.25%
+//
+// เคยลองแก้ให้ "ตลาดค่าธรรมเนียมแพงรอย่อลึกกว่า" (Bitkub 50%) เพื่อให้เกณฑ์ไม้เท่ากันที่ 2.5%
+// แต่ทดสอบย้อนหลัง 3 ปีแล้วพบว่าแย่กว่ามาก: ย่อ 20% ปิดรอบได้เกือบ 100% (12/13, 12/13, 6/6)
+// ส่วนย่อ 50% ปิดรอบแทบไม่ได้เลย (2/17, 0/12) = ขายเหรียญออกไปแล้วไม่ได้ซื้อคืน เหรียญหายถาวร
+// ผลรวม 3 ปี: ย่อ 20% = +0.78% (ชนะ 3/3 ปี) | ย่อ 50% = -6.32% (ชนะ 0/3 ปี)
+// จึงกลับมาตรึงที่ 20% แล้วยอมให้ Bitkub เข้าเทรดนานๆ ครั้งแทน (ซึ่งถูกต้องตามค่าธรรมเนียมที่แพงกว่า)
+function spikeMinBodyPct(feeRate) {
+  return (SPIKE_FEE_SAFETY * (2 * feeRate * 100)) / SPIKE_RETRACE;
 }
 
-// รวมแท่งเล็กเป็นแท่งใหญ่ (เช่น 1 นาที x15 = 15 นาที)
-// จำเป็นเพราะข้อมูลที่ดึงมาเป็นแท่ง 1 นาที ซึ่งแทบไม่มีทางยาวถึงขั้นต่ำที่คุ้มค่าธรรมเนียม
-// "ไม้ยาว" ที่ตาเห็นบนกราฟจริงคือแท่งของไทม์เฟรมที่ใหญ่กว่า จึงต้องรวมก่อนแล้วค่อยตรวจ
-const SPIKE_TIMEFRAME_MINUTES = 15;
-function aggregateCandles(candles, factor) {
-  const out = [];
-  for (let i = candles.length % factor; i + factor <= candles.length; i += factor) {
-    const chunk = candles.slice(i, i + factor);
-    out.push({
-      t: chunk[0].t,
-      o: chunk[0].o,
-      h: Math.max(...chunk.map((c) => c.h)),
-      l: Math.min(...chunk.map((c) => c.l)),
-      c: chunk[chunk.length - 1].c,
-      v: chunk.reduce((a, c) => a + (c.v || 0), 0),
-    });
-  }
-  return out;
-}
+// ไทม์เฟรมที่ใช้หา "ไม้ยาว" — ต้องเป็น 1 ชั่วโมงเท่านั้น ห้ามเปลี่ยนโดยไม่ทดสอบซ้ำ
+// ทดสอบย้อนหลัง 3 ปีเทียบกันแล้ว: บนแท่ง 1 ชม. ได้ +0.78% ชนะ 3/3 ปี
+// แต่บนแท่ง 15 นาที (ที่เคยใช้) ได้ -1.08% ชนะแค่ 2/3 ปี — ไม้สั้นกว่าทำให้สัญญาณเป็นความผันผวนมั่วๆ
+// ดึงแท่ง 1 ชม. มาตรงๆ ไม่รวมเอาจากแท่ง 1 นาที เพราะ 900 แท่ง 1 นาที = แค่ 15 ชม. ไม่พอคำนวณ ATR(14)
+const SPIKE_CANDLE_LIMIT = 200;
 
 // ตรวจว่าแท่งล่าสุดเป็น "ไม้ยาว" ไหม — ต้องผ่านทั้ง 2 เงื่อนไข (ยาวกว่าปกติ + ยาวพอคุ้มค่าธรรมเนียม)
 function detectSpike(candles, feeRate) {
@@ -76,7 +64,7 @@ function detectSpike(candles, feeRate) {
   if (!atr) return null;
   const body = c.c - c.o;
   const bodyPct = Math.abs(body) / c.c * 100;
-  const minBody = spikeMinBodyPct();
+  const minBody = spikeMinBodyPct(feeRate);
   const longEnough = Math.abs(body) > SPIKE_ATR_MULTIPLE * atr;
   return {
     isSpike: longEnough && bodyPct >= minBody,
@@ -142,6 +130,41 @@ async function fetchBinanceCandles() {
       console.error("coinbase candles fallback also failed, auto-trade signal unavailable this run:", err2.message);
       return null;
     }
+  }
+}
+
+// แท่ง 1 ชั่วโมงสำหรับหาไม้ยาวโดยเฉพาะ (คนละชุดกับแท่ง 1 นาทีที่ใช้คำนวณอินดิเคเตอร์)
+async function fetchBinanceSpikeCandles() {
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=${SPIKE_CANDLE_LIMIT}`);
+    if (!res.ok) throw new Error("binance 1h klines http " + res.status);
+    const data = await res.json();
+    return data.map((k) => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));
+  } catch (err) {
+    console.warn("binance 1h klines failed, falling back to Coinbase:", err.message);
+    try {
+      const res2 = await fetch("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600");
+      if (!res2.ok) throw new Error("coinbase 1h http " + res2.status);
+      const d = await res2.json();
+      return d.map((k) => ({ t: k[0] * 1000, o: k[3], h: k[2], l: k[1], c: k[4], v: k[5] })).reverse();
+    } catch (err2) {
+      console.error("spike candles unavailable this run:", err2.message);
+      return null;
+    }
+  }
+}
+
+async function fetchBitkubSpikeCandles() {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - 3600 * SPIKE_CANDLE_LIMIT;
+    const res = await fetch(`https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=60&from=${from}&to=${now}`);
+    const data = await res.json();
+    if (!data || !data.c || !data.t) return null;
+    return data.t.map((t, i) => ({ t: t * 1000, o: data.o[i], h: data.h[i], l: data.l[i], c: data.c[i], v: data.v ? data.v[i] : null }));
+  } catch (err) {
+    console.warn("bitkub 1h klines failed:", err.message);
+    return null;
   }
 }
 
@@ -429,7 +452,7 @@ function signalSummary(signal) {
 //   core  = สะสมระยะยาว ทยอยซื้อเก็บเรื่อยๆ ไม่ขายออกอัตโนมัติ (จำนวนเหรียญโตตามเวลา)
 //   swing = เทรดสั้น ขายตอนแพง ซื้อคืนตอนถูก โดยบังคับให้ซื้อคืนได้เหรียญมากกว่าที่ขายไปเสมอ
 // ทุกการตัดสินใจ (รวม "ไม่ทำอะไร") ถูกบันทึกลง logs พร้อมเหตุผลภาษาไทย ให้แอดมินย้อนอ่านและเอาไปปรับกลยุทธ์ได้
-async function processAutoTrade(db, market, price, candles) {
+async function processAutoTrade(db, market, price, candles, spikeCandles) {
   if (!price || !candles || candles.length < 30) {
     console.log(`[auto:${market}] no price/candles, skipping`);
     return;
@@ -444,7 +467,6 @@ async function processAutoTrade(db, market, price, candles) {
   const verdict = describeScore(score);
 
   // กลยุทธ์เล่นเฉพาะไม้ยาว: ตรวจแท่งล่าสุดว่าเป็นไม้ยาวพอจะเข้าเทรดไหม
-  const spikeCandles = aggregateCandles(candles, SPIKE_TIMEFRAME_MINUTES);
   const spike = detectSpike(spikeCandles, feeRate);
 
   console.log(`[auto:${market}] price=${price} score=${score.toFixed(1)} (${verdict}) atr%=${analysis.atrPct ? analysis.atrPct.toFixed(3) : "n/a"}`);
@@ -595,7 +617,7 @@ async function processAutoTrade(db, market, price, candles) {
           if (!result) return;
 
           // ตั้งซื้อคืนที่ราคาย่อลงมา 20% ของลำตัวไม้ ใช้เงินที่เพิ่งขายได้ทั้งก้อน
-          const retrace = spikeRetrace(feeRate);
+          const retrace = spikeRetrace();
           const target = round2(price - retrace * Math.abs(spike.body));
           const expectedGainPct = ((price * (1 - feeRate)) / (target * (1 + feeRate)) - 1) * 100;
           const order = {
@@ -838,19 +860,21 @@ async function main() {
   const app = initializeApp({ credential: cert(getServiceAccount()) });
   const db = getFirestore(app);
 
-  const [binancePrice, bitkubPrice, binanceCandles, bitkubCandles] = await Promise.all([
+  const [binancePrice, bitkubPrice, binanceCandles, bitkubCandles, binanceSpike, bitkubSpike] = await Promise.all([
     fetchBinancePrice().catch((e) => { console.error("binance price fetch failed", e.message); return null; }),
     fetchBitkubPrice().catch((e) => { console.error("bitkub price fetch failed", e.message); return null; }),
     fetchBinanceCandles(),
     fetchBitkubCandles(),
+    fetchBinanceSpikeCandles(),
+    fetchBitkubSpikeCandles(),
   ]);
 
   await processMarket(db, "binance", binancePrice);
   await processMarket(db, "bitkub", bitkubPrice);
   await processDCA(db, "binance", binancePrice);
   await processDCA(db, "bitkub", bitkubPrice);
-  await processAutoTrade(db, "binance", binancePrice, binanceCandles);
-  await processAutoTrade(db, "bitkub", bitkubPrice, bitkubCandles);
+  await processAutoTrade(db, "binance", binancePrice, binanceCandles, binanceSpike);
+  await processAutoTrade(db, "bitkub", bitkubPrice, bitkubCandles, bitkubSpike);
 
   console.log("done");
 }

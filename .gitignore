@@ -3,3 +3,4 @@ dist
 .DS_Store
 src/firebase-config.local.js
 .firebase/
+scripts/.cache/
