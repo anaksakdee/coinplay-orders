@@ -2,6 +2,7 @@
 // ให้แม้ผู้ใช้จะไม่ได้เปิดหน้าเว็บค้างไว้ก็ตาม (ทำงานฝั่งเซิร์ฟเวอร์ผ่าน Firebase Admin SDK)
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
+import { getMessaging } from "firebase-admin/messaging";
 import { computeReturns, computeSignal } from "../shared/signals.mjs";
 import { scoreMarket, describeScore, positionFraction, THRESHOLDS, computeATR } from "../shared/strategy.mjs";
 import { evaluateIndicators, describeLearning } from "../shared/backtest.mjs";
@@ -97,6 +98,45 @@ const CORE_BUY_FRACTION = 0.05;  // 5% ของทุนตั้งต้น =
 const CORE_MAX_PCT = 0.50;       // สะสม core ได้สูงสุดครึ่งหนึ่งของทุน อีกครึ่งกันไว้ให้ขา swing หมุน
 
 function round2(n) { return Math.round(n * 100) / 100; }
+
+// ส่ง Web Push แจ้งเตือนเมื่อมีการซื้อขายเกิดขึ้นจริง — อ่าน fcmTokens จาก users/{uid} แล้วส่งผ่าน Admin SDK
+// เรียกนอก transaction เสมอ (side effect ภายนอกไม่ควรอยู่ใน retryable transaction ไม่งั้นอาจส่งซ้ำตอน retry)
+// ผู้ใช้ที่ยังไม่เปิดแจ้งเตือน (ไม่มี fcmTokens) จะไม่มีอะไรเกิดขึ้น เงียบๆ ไม่ error
+async function notifyTrade(db, messaging, uid, info) {
+  if (!messaging) return;
+  try {
+    const snap = await db.collection("users").doc(uid).get();
+    const tokens = (snap.data() || {}).fcmTokens || [];
+    if (!tokens.length) return;
+
+    const sideLabel = info.side === "buy" ? "ซื้อ" : "ขาย";
+    const marketLabel = info.market === "bitkub" ? "Bitkub" : "Binance";
+    const sym = info.ccy === "thb" ? "฿" : "$";
+    const title = `${sideLabel} BTC — ${marketLabel}`;
+    const body = `${sideLabel} ${info.qty.toFixed(8)} BTC ที่ ${sym}${Math.round(info.price).toLocaleString()} = ${sym}${Math.round(info.amount).toLocaleString()}${info.note ? " · " + info.note : ""}`;
+
+    const res = await messaging.sendEachForMulticast({
+      tokens,
+      notification: { title, body },
+      data: { url: "/", tag: "trade-" + info.market },
+      webpush: { fcmOptions: { link: "https://coinplay.web.app/" } },
+    });
+
+    // เก็บกวาด token ที่ตายแล้ว (ผู้ใช้ถอนสิทธิ์/ล้างข้อมูลเบราว์เซอร์) กันสะสมค้างไปเรื่อยๆ
+    const dead = [];
+    res.responses.forEach((r, i) => {
+      const code = r.error && r.error.code;
+      if (!r.success && (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-registration-token")) {
+        dead.push(tokens[i]);
+      }
+    });
+    if (dead.length) {
+      await db.collection("users").doc(uid).update({ fcmTokens: FieldValue.arrayRemove(...dead) });
+    }
+  } catch (err) {
+    console.error(`notify failed for ${uid}:`, err.message);
+  }
+}
 
 function getServiceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -254,7 +294,7 @@ function sellSpecificLot(ledger, matchLot, price, feeRate) {
   return { ledger: { cash, btc, avgEntry, lots, orders: ledger.orders || [] }, amount, fee, qty: lot.qty };
 }
 
-async function processMarket(db, market, price) {
+async function processMarket(db, messaging, market, price) {
   if (!price) {
     console.log(`[${market}] no price available, skipping`);
     return;
@@ -275,6 +315,7 @@ async function processMarket(db, market, price) {
       if (!hit) continue;
 
       const userRef = db.collection("users").doc(uid);
+      let notifyInfo = null;
       try {
         await db.runTransaction(async (tx) => {
           const snap = await tx.get(userRef);
@@ -335,8 +376,11 @@ async function processMarket(db, market, price) {
             },
             ts: Timestamp.now(),
           });
+
+          notifyInfo = { side: order.side, qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "คำสั่งรอราคา" };
         });
         console.log(`[${market}] executed order ${order.id} (${order.side} @ ${order.targetPrice}) for user ${uid}`);
+        if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
       } catch (err) {
         console.error(`[${market}] failed to execute order ${order.id} for user ${uid}:`, err.message);
       }
@@ -345,7 +389,7 @@ async function processMarket(db, market, price) {
 }
 
 // ออโต้เทรด DCA — ซื้อ BTC จำนวนคงที่ตามรอบเวลาที่ผู้ใช้ตั้งไว้ ไม่สนราคาขึ้นลง (เก็บสะสม BTC ระยะยาว)
-async function processDCA(db, market, price) {
+async function processDCA(db, messaging, market, price) {
   if (!price) {
     console.log(`[dca:${market}] no price available, skipping`);
     return;
@@ -367,6 +411,7 @@ async function processDCA(db, market, price) {
     if (now - last < intervalMs) continue;
 
     const userRef = db.collection("users").doc(uid);
+    let notifyInfo = null;
     try {
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(userRef);
@@ -424,9 +469,12 @@ async function processDCA(db, market, price) {
           },
           ts: Timestamp.now(),
         });
+
+        notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "DCA" };
       });
       count++;
       console.log(`[dca:${market}] executed for user ${uid}`);
+      if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
     } catch (err) {
       console.error(`[dca:${market}] failed for user ${uid}:`, err.message);
     }
@@ -471,7 +519,7 @@ function signalSummary(signal) {
 // ตามที่กำหนดไว้ว่าจะเทรดเฉพาะไม้ 1 ชม. ขึ้นไป จึงรวมให้ใช้แท่ง 1 ชม. เป็นแหล่งเดียวทั้งหมด
 // (ข้อดีเพิ่มเติม: ตรงกับที่ scripts/fulltest.mjs ใช้ทดสอบไว้พอดี เพราะตอนนั้นข้อมูล 1 นาทีย้อนหลัง
 // 5 ปีดึงไม่ไหว จึงทดสอบด้วยแท่ง 1 ชม. ทั้งคู่อยู่แล้ว — ผลตัวเลข +13.36% จึงตรงกับของจริงมากขึ้น)
-async function processAutoTrade(db, market, price, candles) {
+async function processAutoTrade(db, messaging, market, price, candles) {
   if (!price || !candles || candles.length < 100) {
     console.log(`[auto:${market}] no price/candles, skipping`);
     return;
@@ -538,6 +586,7 @@ async function processAutoTrade(db, market, price, candles) {
     let keepChecking = true, guard = 0;
     while (keepChecking && guard < 30) {
       keepChecking = false; guard++;
+      let notifyInfo = null;
       try {
         await db.runTransaction(async (tx) => {
           const snap = await tx.get(userRef);
@@ -606,7 +655,9 @@ async function processAutoTrade(db, market, price, candles) {
 
           sellCount++; didSomething = true;
           keepChecking = true;
+          notifyInfo = { side: "sell", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: why === "stop_loss" ? "ตัดขาดทุน" : "ล็อกกำไรก่อนขาลง" };
         });
+        if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
       } catch (err) {
         console.error(`[auto:${market}] sell failed for ${uid}:`, err.message);
         keepChecking = false;
@@ -616,6 +667,7 @@ async function processAutoTrade(db, market, price, candles) {
     // ---------- 1b) ไม้เขียวยาว: ขายรับรอบ 20% แล้วตั้งคำสั่งซื้อคืนตอนราคาย่อ ----------
     // ใช้ระบบ "คำสั่งรอราคา" (orders) ที่มีอยู่แล้ว ซึ่ง processMarket จะคอยเช็คให้ทุกรอบ
     if (spike && spike.isSpike && spike.direction === "up") {
+      let notifyInfo = null;
       try {
         await db.runTransaction(async (tx) => {
           const snap = await tx.get(userRef);
@@ -682,13 +734,16 @@ async function processAutoTrade(db, market, price, candles) {
             expectedBtcGainPct: round2(expectedGainPct),
           });
           sellCount++;
+          notifyInfo = { side: "sell", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "ไม้เขียวยาว ขายรับรอบ" };
         });
+        if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
       } catch (err) {
         console.error(`[auto:${market}] spike sell failed for ${uid}:`, err.message);
       }
     }
 
     // ---------- 2) พิจารณาซื้อ (ทั้งขา swing และขา core) ----------
+    let notifyInfo = null;
     try {
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(userRef);
@@ -737,6 +792,7 @@ async function processAutoTrade(db, market, price, candles) {
             await writeDecision(tx, uid, fresh.email, "buy", coreReason,
               { trigger: "core_dca", sleeve: "core", btcBought: result.qty, amount: round2(result.amount) });
             buyCount++; didSomething = true;
+            notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "สะสมระยะยาว (core)" };
             return;
           }
         }
@@ -787,6 +843,7 @@ async function processAutoTrade(db, market, price, candles) {
               roundTrips: newAuto.roundTrips, btcAccumulatedTotal: newAuto.btcAccumulated,
             });
           buyCount++; didSomething = true;
+          notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "ซื้อคืนปิดรอบ" };
           return;
         }
 
@@ -852,7 +909,9 @@ async function processAutoTrade(db, market, price, candles) {
             targetSellPrice: round2(price * (1 + PROFIT_TARGET) / (1 - feeRate)),
           });
         buyCount++; didSomething = true;
+        notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "เปิดไม้ใหม่ตามสัญญาณ" };
       });
+      if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
     } catch (err) {
       console.error(`[auto:${market}] buy failed for ${uid}:`, err.message);
     }
@@ -890,6 +949,7 @@ async function processAutoTrade(db, market, price, candles) {
 async function main() {
   const app = initializeApp({ credential: cert(getServiceAccount()) });
   const db = getFirestore(app);
+  const messaging = getMessaging(app);
 
   // processMarket (คำสั่งรอราคาที่ตั้งไว้) เช็คกับ price ตรงๆ ไม่ต้องใช้แท่งเทียน
   // จึงดึงแค่แท่ง 1 ชม. สำหรับ processAutoTrade เท่านั้น (ก่อนหน้านี้ยังดึงแท่ง 1 นาทีทิ้งไว้โดยไม่ได้ใช้)
@@ -900,12 +960,12 @@ async function main() {
     fetchBitkubSpikeCandles(),
   ]);
 
-  await processMarket(db, "binance", binancePrice);
-  await processMarket(db, "bitkub", bitkubPrice);
-  await processDCA(db, "binance", binancePrice);
-  await processDCA(db, "bitkub", bitkubPrice);
-  await processAutoTrade(db, "binance", binancePrice, binanceHourly);
-  await processAutoTrade(db, "bitkub", bitkubPrice, bitkubHourly);
+  await processMarket(db, messaging, "binance", binancePrice);
+  await processMarket(db, messaging, "bitkub", bitkubPrice);
+  await processDCA(db, messaging, "binance", binancePrice);
+  await processDCA(db, messaging, "bitkub", bitkubPrice);
+  await processAutoTrade(db, messaging, "binance", binancePrice, binanceHourly);
+  await processAutoTrade(db, messaging, "bitkub", bitkubPrice, bitkubHourly);
 
   console.log("done");
 }

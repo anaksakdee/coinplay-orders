@@ -1,11 +1,12 @@
-import { auth, googleProvider, db, ADMIN_EMAIL } from "./firebase.js";
+import { app, auth, googleProvider, db, ADMIN_EMAIL, VAPID_PUBLIC_KEY, messagingSupported } from "./firebase.js";
 import {
   signInWithPopup, signOut, onAuthStateChanged
 } from "firebase/auth";
 import {
-  doc, getDoc, setDoc, updateDoc, addDoc, collection,
+  doc, getDoc, setDoc, updateDoc, addDoc, collection, arrayUnion,
   serverTimestamp, query, where, limit, getDocs
 } from "firebase/firestore";
+import { getMessaging, getToken, onMessage } from "firebase/messaging";
 import { computeSignal } from "../shared/signals.mjs";
 
 /* ---------------- helpers ---------------- */
@@ -90,7 +91,83 @@ function enterApp(){
   updateExchangeUI();
   loadTradeHistory();
   if (!marketStarted) startMarket();
+  refreshNotifyButton();
 }
+
+/* ---------------- แจ้งเตือนในเบราว์เซอร์เมื่อมีการซื้อขาย (Web Push ผ่าน FCM) ----------------
+   ทำงานได้แม้ปิดแท็บ/ปิดเบราว์เซอร์ เพราะ background job (check-orders.mjs) เป็นคนส่ง push มาโดยตรง
+   ไม่ได้พึ่งหน้านี้เปิดค้างไว้ — ต่างจาก Notification API ธรรมดาที่ทำงานเฉพาะตอนแท็บเปิดอยู่เท่านั้น */
+var messaging = null;
+
+async function refreshNotifyButton(){
+  var btn = document.getElementById('btn-notify');
+  if (!btn) return;
+  var supported = await messagingSupported;
+  if (!supported){
+    btn.textContent = '🔕 เบราว์เซอร์นี้ไม่รองรับ';
+    btn.disabled = true;
+    return;
+  }
+  if (typeof Notification === 'undefined'){
+    btn.textContent = '🔕 เบราว์เซอร์นี้ไม่รองรับ';
+    btn.disabled = true;
+    return;
+  }
+  if (Notification.permission === 'granted'){
+    btn.textContent = '🔔 แจ้งเตือนเปิดอยู่';
+    btn.disabled = true;
+  } else if (Notification.permission === 'denied'){
+    btn.textContent = '🔕 ถูกบล็อกไว้ (แก้ในตั้งค่าเบราว์เซอร์)';
+    btn.disabled = true;
+  } else {
+    btn.textContent = '🔔 เปิดแจ้งเตือน';
+    btn.disabled = false;
+  }
+}
+
+async function enableNotifications(){
+  if (!currentUid) return;
+  var btn = document.getElementById('btn-notify');
+  var supported = await messagingSupported;
+  if (!supported || typeof Notification === 'undefined'){
+    alert('เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือนแบบ Push');
+    return;
+  }
+  try {
+    var permission = await Notification.requestPermission();
+    if (permission !== 'granted'){
+      refreshNotifyButton();
+      return;
+    }
+    var reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+    if (!messaging) messaging = getMessaging(app);
+    var token = await getToken(messaging, { vapidKey: VAPID_PUBLIC_KEY, serviceWorkerRegistration: reg });
+    if (token){
+      await updateDoc(doc(db, 'users', currentUid), { fcmTokens: arrayUnion(token) });
+      writeLog('notifications_enabled', {});
+    }
+  } catch (err){
+    console.error('enableNotifications failed', err);
+    alert('เปิดการแจ้งเตือนไม่สำเร็จ: ' + (err && err.message ? err.message : 'unknown error'));
+  }
+  refreshNotifyButton();
+}
+
+document.getElementById('btn-notify').addEventListener('click', enableNotifications);
+
+// ข้อความที่มาถึงตอนแท็บนี้เปิดอยู่และกำลัง focus (foreground) — FCM ไม่โชว์ popup ให้เองในเคสนี้
+// ต้องดักด้วย onMessage แล้วสร้าง Notification เอง ต่างจากตอนปิดแท็บซึ่ง service worker จัดการให้อัตโนมัติ
+messagingSupported.then(function(supported){
+  if (!supported) return;
+  messaging = getMessaging(app);
+  onMessage(messaging, function(payload){
+    var title = (payload.notification && payload.notification.title) || 'CoinPlay';
+    var body = (payload.notification && payload.notification.body) || '';
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted'){
+      new Notification(title, { body: body, icon: '/icon-512.png' });
+    }
+  });
+});
 
 document.getElementById('btn-acknowledge').addEventListener('click', function(){
   if (!currentAccount || !currentUid) return;
