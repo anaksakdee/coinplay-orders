@@ -139,7 +139,10 @@ async function enableNotifications(){
       refreshNotifyButton();
       return;
     }
-    var reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+    await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+    // register() คืนค่าทันทีที่ยังอยู่สถานะ installing ได้ แต่ PushManager.subscribe ต้องการ service worker
+    // ที่ active แล้วเท่านั้น — ต้องรอ .ready ก่อนเสมอ ไม่งั้น subscribe จะพังด้วย "no active Service Worker"
+    var reg = await navigator.serviceWorker.ready;
     if (!messaging) messaging = getMessaging(app);
     var token = await getToken(messaging, { vapidKey: VAPID_PUBLIC_KEY, serviceWorkerRegistration: reg });
     if (token){
