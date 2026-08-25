@@ -1,0 +1,62 @@
+// ทดสอบกติกาบริหารเงินหลายๆ ชุด กับตลาดจริงหลายช่วง (ขาขึ้น/ขาลง/ออกข้าง)
+// เพื่อไม่ให้สรุปจากช่วงเดียวแล้วเข้าใจผิด — ช่วงขาขึ้นจะเข้าข้างการถือเต็มพอร์ตเสมอ
+import { fetchCandles, simulate } from "./simulate.mjs";
+import { THRESHOLDS } from "../shared/strategy.mjs";
+
+const BASE = {
+  startCash: 300, minTicket: 10,
+  buyThreshold: THRESHOLDS.weakBuy, maxOpenSwing: Infinity, minSeparationPct: 0,
+  sizeOffEquity: false, maxPositionPct: 0.6, cashFloorPct: 0,
+  coreIntervalMs: 12 * 3600e3, coreFractionOfStart: 0.10, coreMaxPct: Infinity,
+  dynamicTarget: false, minProfit: 0.008, atrMultiple: 6,
+};
+const cfg = (name, o) => Object.assign({ name }, BASE, o);
+
+// แยกทดสอบทีละอย่าง เพื่อดูว่าการเปลี่ยนแต่ละข้อมีผลจริงไหม (ไม่รวมมั่วจนแยกไม่ออกว่าอะไรช่วย)
+const SELL_GATE = { sellRequiresScoreBelow: -10, btcAccumTarget: 0.002 };
+const CONFIGS = [
+  cfg("A ปัจจุบัน", {}),
+  cfg("B ขายเฉพาะสัญญาณอ่อน + ซื้อคืนง่าย", SELL_GATE),
+  cfg("C = B + ยกเกณฑ์ซื้อเป็น 14", Object.assign({ buyThreshold: 14 }, SELL_GATE)),
+  cfg("D = B + จำกัดไม้พร้อมกัน 6 + เว้นราคา 0.5%", Object.assign({ maxOpenSwing: 6, minSeparationPct: 0.5 }, SELL_GATE)),
+  cfg("E = B+C+D รวม (ไม่กันเงินสด)", Object.assign({ buyThreshold: 14, maxOpenSwing: 6, minSeparationPct: 0.5 }, SELL_GATE)),
+  cfg("F = E + กันเงินสด 25% (ตัวที่ผมเคยเสนอ)", Object.assign({ buyThreshold: 14, maxOpenSwing: 6, minSeparationPct: 0.5, cashFloorPct: 0.25, sizeOffEquity: true, maxPositionPct: 0.18 }, SELL_GATE)),
+];
+
+function regimeLabel(c) {
+  const chg = (c[c.length - 1].c / c[120].c - 1) * 100;
+  if (chg > 4) return `ขาขึ้น +${chg.toFixed(1)}%`;
+  if (chg < -4) return `ขาลง ${chg.toFixed(1)}%`;
+  return `ออกข้าง ${chg >= 0 ? "+" : ""}${chg.toFixed(1)}%`;
+}
+
+const all = await fetchCandles(process.argv[2] || "1h", 1000);
+const CHUNK = 340; // ~14 วันต่อช่วง (มี warmup 120 อยู่ในนั้น)
+const windows = [];
+for (let s = 0; s + CHUNK <= all.length; s += 220) windows.push(all.slice(s, s + CHUNK));
+
+console.log(`ข้อมูลจริง BTCUSDT 1h ${all.length} แท่ง (~${((all[all.length-1].t-all[0].t)/86400e3).toFixed(0)} วัน) แบ่งทดสอบ ${windows.length} ช่วง\n`);
+
+const totals = new Map(CONFIGS.map((c) => [c.name, []]));
+
+windows.forEach((w, wi) => {
+  console.log(`--- ช่วงที่ ${wi + 1}: ${regimeLabel(w)} ---`);
+  for (const c of CONFIGS) {
+    const r = simulate(w, c);
+    const vsHold = (r.btcEquivalent / r.btcIfHeld - 1) * 100;
+    totals.get(c.name).push(vsHold);
+    console.log(`  ${c.name.padEnd(38)} เทียบถือเฉยๆ ${vsHold >= 0 ? "+" : ""}${vsHold.toFixed(2).padStart(6)}%  | ซื้อ ${String(r.buys).padStart(3)} ขาย ${String(r.sells).padStart(3)} รอบครบวง ${r.roundTrips} | เงินสดต่ำสุด ${(r.minCashPct * 100).toFixed(0).padStart(3)}%`);
+  }
+  console.log("");
+});
+
+console.log("===== สรุปรวมทุกช่วง (เทียบกับการซื้อทีเดียวแล้วถือเฉยๆ) =====");
+const rows = [...totals.entries()].map(([name, arr]) => {
+  const avg = arr.reduce((a, b) => a + b, 0) / arr.length;
+  const worst = Math.min(...arr);
+  const wins = arr.filter((x) => x > 0).length;
+  return { name, avg, worst, wins, n: arr.length };
+}).sort((a, b) => b.avg - a.avg);
+for (const r of rows) {
+  console.log(`  ${r.name.padEnd(38)} เฉลี่ย ${r.avg >= 0 ? "+" : ""}${r.avg.toFixed(2).padStart(6)}%  แย่สุด ${r.worst.toFixed(2).padStart(7)}%  ชนะ ${r.wins}/${r.n} ช่วง`);
+}
