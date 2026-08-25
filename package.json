@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check-orders": "node scripts/check-orders.mjs"
+    "check-orders": "node scripts/check-orders.mjs",
+    "check-orders-loop": "node scripts/loop.mjs"
   },
   "dependencies": {
     "firebase": "^11.0.0",

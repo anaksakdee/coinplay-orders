@@ -2,19 +2,31 @@ name: Check pending orders & DCA
 
 on:
   schedule:
-    # GitHub cron is best-effort — actual runs can lag a few minutes during high load
-    - cron: "*/5 * * * *"
+    # GitHub หน่วง scheduled workflow ที่ตั้งถี่ๆ อย่างหนัก (วัดจริงได้ ~36 นาที/รอบ ทั้งที่ตั้ง 5 นาที)
+    # จึงตั้งเป็นรายชั่วโมงแทน แล้วให้ "หนึ่งรอบทำงานยาว" วนเช็คเองข้างในทุก 2 นาที
+    # ผลคือได้ความถี่จริงตามที่ตั้งใจ ไม่ต้องพึ่งความแม่นของ scheduler
+    - cron: "0 * * * *"
   workflow_dispatch: {}
+
+# กันไม่ให้รอบใหม่ซ้อนรอบเก่า — ถ้ารอบก่อนยังวนอยู่ ให้รอบใหม่ยกเลิกตัวเองไป
+concurrency:
+  group: check-orders
+  cancel-in-progress: false
 
 jobs:
   check-orders:
     runs-on: ubuntu-latest
+    # เผื่อเวลาให้วนครบชั่วโมงแล้วจบก่อนรอบถัดไปเริ่มพอดี
+    timeout-minutes: 62
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: npm install --omit=dev
-      - run: npm run check-orders
+      - name: Run trading loop for ~58 minutes
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          LOOP_MINUTES: "58"
+          LOOP_INTERVAL_SECONDS: "120"
+        run: npm run check-orders-loop
