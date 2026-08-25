@@ -82,7 +82,18 @@ function detectSpike(candles, feeRate) {
 }
 
 const CORE_BUY_INTERVAL_MS = 12 * 60 * 60 * 1000; // ขาสะสมระยะยาว: ทยอยซื้อทุก 12 ชั่วโมง
-const CORE_BUY_FRACTION = 0.10; // ใช้เงินสด 10% ต่อการสะสมระยะยาว 1 ครั้ง
+// ทุนตั้งต้นของแต่ละตลาด — ใช้เป็นฐานคิดขนาดไม้ core ให้คงที่ ไม่ใช่คิดจากเงินสดที่เหลือ
+const STARTING_BALANCE = { binance: 300, bitkub: 3000 };
+
+// ขา core: ซื้อครั้งละ 5% ของ "ทุนตั้งต้น" และรวมกันแล้วห้ามเกิน 50% ของทุน
+//
+// เดิมคิดจาก "เงินสดที่เหลือ" 10% ทุก 12 ชม. ซึ่งกินทุนหมดเร็วมาก จำลองกับทุน $300 จริงแล้ว:
+//   วันที่ 5 เหลือเงินสด $104 | วันที่ 14 เหลือ $15.65 | วันที่ 30 เหลือ $0.54
+// พอเงินสดหมด ขา swing ก็ไม่มีเงินซื้อ และเหรียญทั้งหมดถูกตีตราเป็น core ซึ่งห้ามขาย
+// ผลคือกลยุทธ์ไม้ยาวที่ทดสอบไว้ (+9.16%) จะไม่มีโอกาสทำงานเลยแม้แต่ครั้งเดียว
+// อีกทั้งไม้ core จะเล็กลงเรื่อยๆ จนต่ำกว่าขั้นต่ำจริงของตลาด ($0.05 ในวันที่ 30)
+const CORE_BUY_FRACTION = 0.05;  // 5% ของทุนตั้งต้น = $15 ต่อครั้ง (คงที่)
+const CORE_MAX_PCT = 0.50;       // สะสม core ได้สูงสุดครึ่งหนึ่งของทุน อีกครึ่งกันไว้ให้ขา swing หมุน
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
@@ -651,7 +662,7 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
           if (!(swingBtc > 0)) return;
           const qty = swingBtc * SPIKE_TRADE_PCT;
           const amount = qty * price;
-          const minTicket = market === "bitkub" ? 20 : 1;
+          const minTicket = market === "bitkub" ? 100 : 5;
           if (amount < minTicket) return;
 
           const result = sellSwingOnly(fl, qty, price, feeRate);
@@ -708,22 +719,26 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
 
         const cash = fl.cash || 0;
         const lastSell = fl.lastSell;
-        const minTicket = market === "bitkub" ? 20 : 1; // ไม้เล็กกว่านี้ไม่คุ้มค่าธรรมเนียม
+        const minTicket = market === "bitkub" ? 100 : 5; // ขั้นต่ำจริงของตลาด (Binance ~$5, Bitkub ~฿100) ไม้เล็กกว่านี้สั่งจริงไม่ผ่าน
         const blockers = [];
 
         // ขา core ต้องมาก่อนด่านรอซื้อคืน — เดิมอยู่หลังด่านนี้ ทำให้ตอนมีคำสั่งซื้อคืนค้าง
         // (เคยค้างนานถึง 165 วัน) การสะสมระยะยาวถูกบล็อกไปด้วยทั้งที่ไม่เกี่ยวข้องกัน
         const coreDue = now - (fa.lastCoreBuyAt || 0) >= CORE_BUY_INTERVAL_MS;
+        const startCap = STARTING_BALANCE[market];
+        const coreSpent = fa.coreSpent || 0;
+        const coreCapLeft = startCap * CORE_MAX_PCT - coreSpent;
 
-        // ขา core: ทยอยสะสมระยะยาวเป็นรอบเวลา ตราบใดที่ไม่ใช่ขาลงรุนแรง
-        if (coreDue && score > THRESHOLDS.strongSell) {
-          const coreAmount = Math.max(minTicket, cash * CORE_BUY_FRACTION);
+        // ขา core: ทยอยสะสมระยะยาวเป็นรอบเวลา ตราบใดที่ไม่ใช่ขาลงรุนแรง และยังไม่ชนเพดานครึ่งทุน
+        if (coreDue && score > THRESHOLDS.strongSell && coreCapLeft >= minTicket) {
+          // ขนาดคงที่จากทุนตั้งต้น ไม่ใช่ % ของเงินสดที่เหลือ (ไม่งั้นไม้จะเล็กลงจนไร้ความหมาย)
+          const coreAmount = Math.min(coreCapLeft, Math.max(minTicket, startCap * CORE_BUY_FRACTION));
           const result = applyTrade(fl, "buy", coreAmount, price, feeRate);
           if (result) {
             // ทำเครื่องหมายไม้ล่าสุดเป็นขา core เพื่อไม่ให้ระบบขายออกอัตโนมัติ
             const lots = result.ledger.lots.slice();
             lots[lots.length - 1] = Object.assign({}, lots[lots.length - 1], { sleeve: "core" });
-            const newAuto = Object.assign({}, fa, { lastCoreBuyAt: now });
+            const newAuto = Object.assign({}, fa, { lastCoreBuyAt: now, coreSpent: coreSpent + result.amount });
             const equity = result.ledger.cash + result.ledger.btc * price;
             tx.update(userRef, {
               [`${ledgerKey}.cash`]: result.ledger.cash,
