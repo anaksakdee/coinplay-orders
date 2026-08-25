@@ -23,7 +23,7 @@ function atrSeries(candles, period = 14) {
   return out;
 }
 
-function run(candles, atr, minBodyPct, retrace) {
+function run(candles, atr, minBodyPct, retrace, tradePct = TRADE_PCT) {
   let cash = 0;
   let btc = (300 / (1 + FEE)) / candles[WARMUP].c;
   let pendBuy = null, pendSell = null;
@@ -48,7 +48,7 @@ function run(candles, atr, minBodyPct, retrace) {
 
     if (body > 0) {
       if (pendBuy) continue;
-      const q = btc * TRADE_PCT;
+      const q = btc * tradePct;
       if (q * c.c > 5) {
         const proceeds = q * c.c * (1 - FEE);
         cash += proceeds; btc -= q; sells++; attempts++;
@@ -56,7 +56,7 @@ function run(candles, atr, minBodyPct, retrace) {
       }
     } else {
       if (pendSell) continue;
-      const spend = cash * TRADE_PCT;
+      const spend = cash * tradePct;
       if (spend > 5) {
         const q = (spend / (1 + FEE)) / c.c;
         btc += q; cash -= spend; attempts++;
@@ -118,3 +118,45 @@ console.log("\n===== 5 อันดับแรกตามค่าเฉลี
 results.sort((a, b) => b.avg - a.avg).slice(0, 5).forEach((w, i) => {
   console.log(`  ${i+1}. ไม้ >=${w.b}% ย่อ ${(w.r*100).toFixed(0)}% -> ${w.avg >= 0 ? "+" : ""}${w.avg.toFixed(2)}% (ชนะ ${w.wins}/3) | ${w.trades} ครั้ง | ปิดรอบ ${w.fillRate.toFixed(0)}%`);
 });
+
+// ---------- ตารางที่ 2: เพิ่ม "ปริมาณการซื้อขาย" ----------
+// ตรึงระยะย่อไว้ที่ 20% (คอลัมน์เดียวที่กำไรทุกปี) แล้วไล่ทั้ง 2 ทางที่จะเพิ่มปริมาณ:
+//   แนวนอน = ขนาดไม้ต่ำลง -> เข้าเทรดถี่ขึ้น
+//   แนวตั้ง = เทรดครั้งละกี่ % ของพอร์ต -> ไม้ใหญ่ขึ้นต่อครั้ง
+const SIZES = [0.2, 0.3, 0.4, 0.5, 0.6];
+const BODIES2 = [1.5, 2.0, 2.5, 3.0];
+console.log("\n\n===== เพิ่มปริมาณการซื้อขาย (ตรึงย่อ 20%) =====");
+console.log("เทรดครั้งละ\ไม้ยาว" + BODIES2.map((b) => `>=${b}%`.padStart(17)).join(""));
+const grid2 = [];
+for (const s of SIZES) {
+  let row = `${(s * 100).toFixed(0)}% ของพอร์ต`.padEnd(18);
+  for (const b of BODIES2) {
+    const per = windows.map((w) => run(w.c, w.a, b, 0.2, s));
+    const avg = per.reduce((a, x) => a + x.vsHold, 0) / per.length;
+    const wins = per.filter((x) => x.vsHold > 0).length;
+    const trades = per.reduce((a, x) => a + x.attempts, 0);
+    const fillRate = per.reduce((a, x) => a + x.fillRate, 0) / per.length;
+    grid2.push({ s, b, avg, wins, trades, fillRate });
+    row += `${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%(${wins}/3)`.padStart(17);
+  }
+  console.log(row);
+}
+console.log("\n----- เรียงตามผลตอบแทน เฉพาะที่กำไรครบ 3/3 ปี -----");
+const w2 = grid2.filter((x) => x.wins === 3).sort((a, b) => b.avg - a.avg);
+if (!w2.length) console.log("  ไม่มี");
+w2.forEach((x, i) => console.log(`  ${i + 1}. เทรดครั้งละ ${(x.s * 100).toFixed(0)}% + ไม้ >=${x.b}% -> +${x.avg.toFixed(2)}% | ${x.trades} ครั้ง/3ปี | ปิดรอบ ${x.fillRate.toFixed(0)}%`));
+
+// ---------- ตารางที่ 3: ดันขนาดไม้ต่อครั้งให้สุด เพื่อดูว่ามีจุดที่พังไหม ----------
+console.log("\n\n===== ดันปริมาณต่อครั้งให้สุด (ไม้ >=2.5%, ย่อ 20%) — ดูผลรายปีด้วย =====");
+console.log("เทรดครั้งละ".padEnd(14) + "เฉลี่ย".padStart(9) + "  |" + windows.map((_, i) => `ปีที่${i+1}`.padStart(9)).join("") + "   ปิดรอบ");
+for (const s of [0.2, 0.4, 0.6, 0.7, 0.8, 0.9, 1.0]) {
+  const per = windows.map((w) => run(w.c, w.a, 2.5, 0.2, s));
+  const avg = per.reduce((a, x) => a + x.vsHold, 0) / per.length;
+  const fr = per.reduce((a, x) => a + x.fillRate, 0) / per.length;
+  console.log(
+    `${(s * 100).toFixed(0)}% ของพอร์ต`.padEnd(14) +
+    `${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%`.padStart(9) + "  |" +
+    per.map((x) => `${x.vsHold >= 0 ? "+" : ""}${x.vsHold.toFixed(2)}%`.padStart(9)).join("") +
+    `   ${fr.toFixed(0)}%`
+  );
+}

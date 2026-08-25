@@ -29,7 +29,14 @@ const KLINE_LIMIT = 900; // ดึงย้อนหลังเยอะพอ�
 // ไม้แดงยาว  -> ซื้อบางส่วนตอนดิ่ง แล้วตั้งขายตอนราคาเด้งกลับ
 // ไม้สั้น/ปกติ -> ไม่ทำอะไร (ไม่ไล่ซื้อระหว่างทาง)
 const SPIKE_ATR_MULTIPLE = 1.5;  // ต้องยาวกว่าความผันผวนปกติของช่วงนั้น
-const SPIKE_TRADE_PCT = 0.20;    // เทรดครั้งละ 20% ตามที่กำหนด
+// เทรดครั้งละกี่ % ของเหรียญในขา swing
+// ทดสอบ 3 ปีแล้วพบว่า "เพิ่มขนาดต่อครั้ง" ได้ผลกว่า "เทรดถี่ขึ้น" ชัดเจน (ไม้ >=2.5% ย่อ 20%):
+//   20% -> +0.78% | 40% -> +1.70% | 50% -> +2.17% | 60% -> +2.65% | 100% -> +4.64%
+//   (กำไรทุกปีทั้งหมด ปิดรอบสำเร็จ 100% ทุกระดับ)
+// ผลขึ้นเป็นเส้นตรงจนถึง 100% ไม่มีจุดพัง แต่ "ปิดรอบได้ 32/32 ครั้ง" มาจากตัวอย่างแค่ 32 ครั้ง
+// ทางสถิติโอกาสพลาดจริงยังอาจสูงถึง ~8.9% ถ้าเจอสปайค์ที่ไม่ย่อกลับตอนใช้ 100% = เหรียญหายยกก้อน
+// จึงเลือก 50% เป็นจุดสมดุล: ได้ผลตอบแทน ~2.8 เท่าของเดิม แต่ยังเหลือเหรียญอีกครึ่งไว้กันเหนียว
+const SPIKE_TRADE_PCT = 0.50;
 const SPIKE_RETRACE = 0.20;      // ตั้งไม้สวนที่ 20% ของลำตัวไม้ — ตรึงไว้ ห้ามขยายให้ลึกกว่านี้ (ดูเหตุผลด้านล่าง)
 const SPIKE_FEE_SAFETY = 2.5;    // ส่วนต่างที่จะได้ ต้องมากกว่าค่าธรรมเนียมไป-กลับอย่างน้อยเท่านี้
 
@@ -216,6 +223,37 @@ function applyTrade(ledger, side, amountRaw, price, feeRate) {
   acc.avgEntry = acc.btc > 0 ? lotsTotalCost / acc.btc : 0;
 
   return { ledger: acc, amount, fee, qty };
+}
+
+// ขายเฉพาะเหรียญในขา swing เท่านั้น — ห้ามแตะขา core ที่ตั้งใจถือยาวไม่ขายออก
+// จำเป็นเพราะ applyTrade ขายแบบ FIFO ไล่จากล็อตหน้าสุด ซึ่งอาจเป็นล็อต core
+// (ยิ่งเพิ่ม % การเทรดต่อครั้ง ยิ่งกินขา core หนักขึ้น จนเจตนา "สะสมระยะยาว" พังทั้งหมด)
+function sellSwingOnly(ledger, qtyWanted, price, feeRate) {
+  const lots = (ledger.lots || []).map((l) => ({ ...l }));
+  let remaining = qtyWanted;
+  let sold = 0;
+  const kept = [];
+  for (const lot of lots) {
+    if (lot.sleeve === "core" || remaining <= 1e-12) { kept.push(lot); continue; }
+    if (lot.qty <= remaining) { remaining -= lot.qty; sold += lot.qty; }
+    else { kept.push({ ...lot, qty: lot.qty - remaining }); sold += remaining; remaining = 0; }
+  }
+  if (sold <= 0) return null;
+  const amount = sold * price;
+  if (amount <= 0.01) return null;
+  const fee = amount * feeRate;
+  let btc = (ledger.btc || 0) - sold;
+  if (btc < 1e-9) btc = 0;
+  const cost = kept.reduce((a, l) => a + l.qty * l.price, 0);
+  return {
+    ledger: {
+      cash: ledger.cash + amount - fee,
+      btc, lots: kept,
+      avgEntry: btc > 0 ? cost / btc : 0,
+      orders: ledger.orders || [],
+    },
+    amount, fee, qty: sold,
+  };
 }
 
 // ขาย "รอบที่ระบุ" เจาะจงตัวล็อตนั้นโดยตรง (ไม่ใช้ FIFO ทั่วไปแบบ applyTrade) — จำเป็นสำหรับออโต้เทรด
@@ -608,12 +646,15 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
           // ถ้ามีคำสั่งซื้อคืนจากไม้ยาวรอบก่อนค้างอยู่ ไม่ต้องซ้อนอีก
           if ((fl.orders || []).some((o) => o.spike)) return;
 
-          const qty = fl.btc * SPIKE_TRADE_PCT;
+          // คิด % จากเหรียญในขา swing เท่านั้น ไม่นับขา core ที่ตั้งใจถือยาว
+          const swingBtc = (fl.lots || []).filter((l) => l.sleeve !== "core").reduce((a, l) => a + l.qty, 0);
+          if (!(swingBtc > 0)) return;
+          const qty = swingBtc * SPIKE_TRADE_PCT;
           const amount = qty * price;
           const minTicket = market === "bitkub" ? 20 : 1;
           if (amount < minTicket) return;
 
-          const result = applyTrade(fl, "sell", amount, price, feeRate);
+          const result = sellSwingOnly(fl, qty, price, feeRate);
           if (!result) return;
 
           // ตั้งซื้อคืนที่ราคาย่อลงมา 20% ของลำตัวไม้ ใช้เงินที่เพิ่งขายได้ทั้งก้อน
