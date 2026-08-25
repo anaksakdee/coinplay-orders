@@ -9,7 +9,8 @@
 // ใช้เพื่อ "ลดน้ำหนักตัวที่พิสูจน์แล้วว่าไม่ช่วย" มากกว่าจะเชื่อว่ามันทำนายอนาคตได้แม่นยำ
 
 import { computeRSI, computeEMA, computeBollinger, computeMACD } from "./signals.mjs";
-import { computePercentB, computeROC, computeRange } from "./strategy.mjs";
+import { computePercentB, computeROC, computeRange, computeStochastic, computeWilliamsR,
+         computeCCI, computeDMI, computeMFI, computeOBVSlope } from "./strategy.mjs";
 
 // คะแนนดิบของแต่ละเทคนิคที่ "คำนวณเร็ว" (ไม่รวม Monte Carlo ที่หนักเกินจะรันย้อนหลังทุกแท่ง)
 // สูตรตรงกับใน strategy.mjs เพื่อให้สิ่งที่วัดย้อนหลังคือสิ่งเดียวกับที่ใช้ตัดสินใจจริง
@@ -37,6 +38,29 @@ export function cheapScores(price, window) {
 
   const range = computeRange(window, 60);
   if (range) out.rangePos = Math.max(-100, Math.min(100, (0.5 - range.position) * 160));
+
+  // อินดิเคเตอร์ชุดเพิ่ม — สูตรต้องตรงกับ scoreMarket ใน strategy.mjs
+  // ไม่งั้นสิ่งที่วัดความแม่นย้อนหลัง จะไม่ใช่สิ่งเดียวกับที่เอาไปตัดสินใจจริง
+  const stoch = computeStochastic(window, 14);
+  if (stoch != null) out.stoch = Math.max(-100, Math.min(100, (50 - stoch) * 2.4));
+
+  const willr = computeWilliamsR(window, 14);
+  if (willr != null) out.williams = Math.max(-100, Math.min(100, (-50 - willr) * 2.4));
+
+  const cci = computeCCI(window, 20);
+  if (cci != null) out.cci = Math.max(-100, Math.min(100, -cci / 2));
+
+  const dmi = computeDMI(window, 14);
+  if (dmi) {
+    const dirRaw = Math.max(-100, Math.min(100, (dmi.plusDI - dmi.minusDI) * 4));
+    out.dmi = dirRaw * Math.min(1, dmi.adx / 40);
+  }
+
+  const mfi = computeMFI(window, 14);
+  if (mfi != null) out.mfi = Math.max(-100, Math.min(100, (50 - mfi) * 3));
+
+  const obv = computeOBVSlope(window, 20);
+  if (obv != null) out.obv = Math.max(-100, Math.min(100, obv));
 
   return out;
 }
@@ -77,10 +101,23 @@ export function evaluateIndicators(candles, horizon = 20, warmup = 60) {
     const st = stats[key];
     const hitRate = st.sumAbs > 0 ? st.hits / st.sumAbs : null;
     const edge = st.n > 0 ? st.sumEdge / st.n : 0;
-    // ตัวคูณน้ำหนัก: ทายถูกเกิน 50% = เพิ่มน้ำหนัก, ต่ำกว่า = ลดน้ำหนัก
-    // จำกัดช่วง 0.4-1.6 เพื่อไม่ให้ผลจากอดีตช่วงสั้นๆ เหวี่ยงระบบมากเกินไป
+    // ตัวคูณน้ำหนัก — จุดสำคัญ: ยอมให้ติดลบได้ (กลับทิศสัญญาณ)
+    //
+    // ของเดิมบังคับให้เป็นบวกเสมอ (0.4-1.6) ตัวที่ทายถูกแค่ 33% จึงยัง "ดันคะแนนไปทางเดิม" อยู่ดี
+    // แค่เบาลง ทั้งที่ความจริงคือมันทายผิด 67% ของเวลา = ถ้าทำตรงข้ามจะถูก 67%
+    // อาการที่เห็นจริงคือระบบไล่ซื้อตอนกราฟกำลังขึ้น เพราะ trend/momentum/macd (แม่นต่ำกว่า 50% ทั้งคู่)
+    // ช่วยกันดันคะแนนขึ้นในจังหวะที่ไม่ควรซื้อ
+    //
+    // ใหม่: แม่นเกิน 50% = ใช้ตามทิศเดิม, ต่ำกว่า 50% ชัดเจน = กลับทิศ (contrarian), ใกล้ 50% = ปิดเสียงทิ้ง
+    const MIN_SAMPLES = 30;   // ต้องมีตัวอย่างพอ ไม่งั้นอาจกลับทิศเพราะความบังเอิญ
+    const DEAD_ZONE = 0.04;   // 46%-54% ถือว่าเดาสุ่ม ไม่ให้มีน้ำหนัก
     let mult = 1;
-    if (hitRate != null) mult = Math.max(0.4, Math.min(1.6, 1 + (hitRate - 0.5) * 3));
+    if (hitRate != null && st.sumAbs >= MIN_SAMPLES) {
+      const edgeFromHalf = hitRate - 0.5;
+      mult = Math.abs(edgeFromHalf) < DEAD_ZONE
+        ? 0.15
+        : Math.max(-1.6, Math.min(1.6, edgeFromHalf * 8));
+    }
     result[key] = {
       hitRate: hitRate != null ? Math.round(hitRate * 1000) / 10 : null, // เป็น %
       edge: Math.round(edge * 1000) / 1000,

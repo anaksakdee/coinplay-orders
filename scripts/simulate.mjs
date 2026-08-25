@@ -17,7 +17,7 @@ export async function fetchCandles(interval = "5m", limit = 1000) {
   const res = await fetch(url);
   if (!res.ok) throw new Error("binance klines http " + res.status);
   const data = await res.json();
-  return data.map((k) => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4] }));
+  return data.map((k) => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));
 }
 
 function ceiling(sellPrice, gain) {

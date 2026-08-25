@@ -24,8 +24,6 @@ function btcAccumCeiling(sellPrice, feeRate, gain) {
   return (sellPrice * (1 - feeRate)) / ((1 + feeRate) * (1 + gain));
 }
 const KLINE_LIMIT = 300; // ดึงย้อนหลังเยอะขึ้นเพื่อให้มีข้อมูลพอสำหรับประเมินอินดิเคเตอร์ย้อนหลัง (backtest)
-const MAX_OPEN_SWING = 8;            // เพดานไม้ swing ที่เปิดพร้อมกัน
-const MIN_SWING_SEPARATION_PCT = 0.5; // ไม้ใหม่ต้องห่างจากไม้ที่ถืออยู่อย่างน้อยเท่านี้ (%)
 const CORE_BUY_INTERVAL_MS = 12 * 60 * 60 * 1000; // ขาสะสมระยะยาว: ทยอยซื้อทุก 12 ชั่วโมง
 const CORE_BUY_FRACTION = 0.10; // ใช้เงินสด 10% ต่อการสะสมระยะยาว 1 ครั้ง
 
@@ -69,14 +67,14 @@ async function fetchBinanceCandles() {
     const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${KLINE_LIMIT}`);
     if (!res.ok) throw new Error("binance klines http " + res.status);
     const data = await res.json();
-    return data.map((k) => ({ t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]) }));
+    return data.map((k) => ({ t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5]) }));
   } catch (err) {
     console.warn("binance klines fetch failed, falling back to Coinbase:", err.message);
     try {
       const res2 = await fetch("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60");
       if (!res2.ok) throw new Error("coinbase candles http " + res2.status);
       const data2 = await res2.json(); // [ [time, low, high, open, close, volume], ... ] ใหม่สุดก่อน
-      const candles = data2.map((k) => ({ t: k[0] * 1000, o: k[3], h: k[2], l: k[1], c: k[4] })).reverse();
+      const candles = data2.map((k) => ({ t: k[0] * 1000, o: k[3], h: k[2], l: k[1], c: k[4], v: k[5] })).reverse();
       return candles.slice(-KLINE_LIMIT);
     } catch (err2) {
       console.error("coinbase candles fallback also failed, auto-trade signal unavailable this run:", err2.message);
@@ -92,7 +90,7 @@ async function fetchBitkubCandles() {
     const res = await fetch(`https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=1&from=${from}&to=${now}`);
     const data = await res.json();
     if (!data || !data.c || !data.t) return null;
-    return data.t.map((t, i) => ({ t: t * 1000, o: data.o[i], h: data.h[i], l: data.l[i], c: data.c[i] }));
+    return data.t.map((t, i) => ({ t: t * 1000, o: data.o[i], h: data.h[i], l: data.l[i], c: data.c[i], v: data.v ? data.v[i] : null }));
   } catch (err) {
     console.warn("bitkub klines fetch failed, auto-trade signal unavailable this run:", err.message);
     return null;
@@ -614,15 +612,8 @@ async function processAutoTrade(db, market, price, candles) {
         // (ไม่ใช่ปัญหาซื้อรัวไม่รู้จบ เพราะแต่ละครั้งใช้สัดส่วนของเงินสด "ที่เหลือ" ยิ่งซื้อถี่ ก้อนเงินยิ่งเล็กลงเอง)
         if (score < THRESHOLDS.weakBuy) blockers.push(`คะแนนรวม ${score.toFixed(1)} ยังต่ำกว่าเกณฑ์ซื้อ ${THRESHOLDS.weakBuy}`);
 
-        // กันอาการ "ซื้อกองที่ราคาเดียวกัน" — ที่ผ่านมาเคยเปิด 7 ไม้ในชั่วโมงเดียวที่ราคาแทบเท่ากัน
-        // กลายเป็นก้อนใหญ่ก้อนเดียวที่ขึ้นลงพร้อมกันหมด ไม่ได้กระจายจังหวะเข้าจริง
-        // (เป็นการกันความเสี่ยงเชิงโครงสร้าง ไม่ใช่เพื่อเพิ่มผลตอบแทน — ทดสอบแล้วผลตอบแทนพอๆ เดิม)
-        const openSwing = (fl.lots || []).filter((l) => l.sleeve !== "core");
-        if (openSwing.length >= MAX_OPEN_SWING) {
-          blockers.push(`มีไม้ swing เปิดอยู่ ${openSwing.length} ไม้แล้ว (เพดาน ${MAX_OPEN_SWING})`);
-        } else if (openSwing.some((l) => Math.abs(price / l.price - 1) * 100 < MIN_SWING_SEPARATION_PCT)) {
-          blockers.push(`ราคาตอนนี้ใกล้กับไม้ที่ถืออยู่แล้ว (ห่างไม่ถึง ${MIN_SWING_SEPARATION_PCT}%) รอให้ราคาขยับก่อนค่อยเปิดไม้ใหม่`);
-        }
+        // ไม่จำกัดว่าห้ามซื้อที่ราคาใกล้ไม้เดิม — ซื้อกองที่ราคาเดียวกันไม่ผิด ถ้าสัญญาณบอกว่าควรซื้อ
+        // ตัวตัดสินคือ "คุณภาพสัญญาณ" อย่างเดียว (คะแนนรวมจากอินดิเคเตอร์ที่ถ่วงน้ำหนักตามความแม่นจริง)
 
         if (blockers.length) {
           const topReasons = analysis.parts.slice().sort((a, b) => Math.abs(b.score * b.weight) - Math.abs(a.score * a.weight)).slice(0, 3);

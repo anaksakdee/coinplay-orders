@@ -12,15 +12,14 @@ const BASE = {
 };
 const cfg = (name, o) => Object.assign({ name }, BASE, o);
 
-// แยกทดสอบทีละอย่าง เพื่อดูว่าการเปลี่ยนแต่ละข้อมีผลจริงไหม (ไม่รวมมั่วจนแยกไม่ออกว่าอะไรช่วย)
-const SELL_GATE = { sellRequiresScoreBelow: -10, btcAccumTarget: 0.002 };
+// ทดสอบ "เกณฑ์คะแนนขั้นต่ำที่จะซื้อ" โดยเฉพาะ — ตัวนี้คือตัวคุมว่าระบบจะซื้อถี่แค่ไหน
+// คะแนน 8 บนสเกล -100..100 แทบจะเป็นกลาง จึงซื้อได้เกือบตลอดเวลารวมถึงตอนกราฟกำลังขึ้น
 const CONFIGS = [
-  cfg("A ปัจจุบัน", {}),
-  cfg("B ขายเฉพาะสัญญาณอ่อน + ซื้อคืนง่าย", SELL_GATE),
-  cfg("C = B + ยกเกณฑ์ซื้อเป็น 14", Object.assign({ buyThreshold: 14 }, SELL_GATE)),
-  cfg("D = B + จำกัดไม้พร้อมกัน 6 + เว้นราคา 0.5%", Object.assign({ maxOpenSwing: 6, minSeparationPct: 0.5 }, SELL_GATE)),
-  cfg("E = B+C+D รวม (ไม่กันเงินสด)", Object.assign({ buyThreshold: 14, maxOpenSwing: 6, minSeparationPct: 0.5 }, SELL_GATE)),
-  cfg("F = E + กันเงินสด 25% (ตัวที่ผมเคยเสนอ)", Object.assign({ buyThreshold: 14, maxOpenSwing: 6, minSeparationPct: 0.5, cashFloorPct: 0.25, sizeOffEquity: true, maxPositionPct: 0.18 }, SELL_GATE)),
+  cfg("เกณฑ์ 8 (ของเดิม)", { buyThreshold: 8 }),
+  cfg("เกณฑ์ 15", { buyThreshold: 15 }),
+  cfg("เกณฑ์ 22", { buyThreshold: 22 }),
+  cfg("เกณฑ์ 30", { buyThreshold: 30 }),
+  cfg("เกณฑ์ 40", { buyThreshold: 40 }),
 ];
 
 function regimeLabel(c) {
