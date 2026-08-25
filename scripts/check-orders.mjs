@@ -711,6 +711,41 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
         const minTicket = market === "bitkub" ? 20 : 1; // ไม้เล็กกว่านี้ไม่คุ้มค่าธรรมเนียม
         const blockers = [];
 
+        // ขา core ต้องมาก่อนด่านรอซื้อคืน — เดิมอยู่หลังด่านนี้ ทำให้ตอนมีคำสั่งซื้อคืนค้าง
+        // (เคยค้างนานถึง 165 วัน) การสะสมระยะยาวถูกบล็อกไปด้วยทั้งที่ไม่เกี่ยวข้องกัน
+        const coreDue = now - (fa.lastCoreBuyAt || 0) >= CORE_BUY_INTERVAL_MS;
+
+        // ขา core: ทยอยสะสมระยะยาวเป็นรอบเวลา ตราบใดที่ไม่ใช่ขาลงรุนแรง
+        if (coreDue && score > THRESHOLDS.strongSell) {
+          const coreAmount = Math.max(minTicket, cash * CORE_BUY_FRACTION);
+          const result = applyTrade(fl, "buy", coreAmount, price, feeRate);
+          if (result) {
+            // ทำเครื่องหมายไม้ล่าสุดเป็นขา core เพื่อไม่ให้ระบบขายออกอัตโนมัติ
+            const lots = result.ledger.lots.slice();
+            lots[lots.length - 1] = Object.assign({}, lots[lots.length - 1], { sleeve: "core" });
+            const newAuto = Object.assign({}, fa, { lastCoreBuyAt: now });
+            const equity = result.ledger.cash + result.ledger.btc * price;
+            tx.update(userRef, {
+              [`${ledgerKey}.cash`]: result.ledger.cash,
+              [`${ledgerKey}.btc`]: result.ledger.btc,
+              [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
+              [`${ledgerKey}.lots`]: lots,
+              [`${ledgerKey}.autoTrade`]: newAuto,
+            });
+            const coreReason = `สะสมระยะยาว (core): ครบรอบสะสม ${(CORE_BUY_INTERVAL_MS / 3600000).toFixed(0)} ชั่วโมง และคะแนนรวม ${score.toFixed(1)} (${verdict}) ไม่ได้เป็นขาลงรุนแรง จึงทยอยซื้อเก็บ ${round2(result.amount)} (${(CORE_BUY_FRACTION * 100).toFixed(0)}% ของเงินสด) ได้ ${result.qty.toFixed(8)} BTC — ไม้ขานี้จะไม่ถูกขายอัตโนมัติ เก็บสะสมให้จำนวนเหรียญโตขึ้นระยะยาว`;
+            const tradeRef = db.collection("trades").doc();
+            tx.set(tradeRef, {
+              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
+              price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
+              autoTrade: true, sleeve: "core", trigger: "core_dca", reason: coreReason, ts: Timestamp.now(),
+            });
+            await writeDecision(tx, uid, fresh.email, "buy", coreReason,
+              { trigger: "core_dca", sleeve: "core", btcBought: result.qty, amount: round2(result.amount) });
+            buyCount++; didSomething = true;
+            return;
+          }
+        }
+
         // 2a) ถ้ามีเงินค้างจากการขายรอบก่อน -> ต้องซื้อคืนให้ได้เหรียญมากกว่าเดิมเท่านั้น
         if (lastSell && lastSell.qty > 0) {
           const ceiling = btcAccumCeiling(lastSell.price, feeRate, BTC_ACCUM_TARGET);
@@ -767,39 +802,6 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
             { trigger: "no_cash", cash: round2(cash) });
           holdCount++;
           return;
-        }
-
-        const coreDue = now - (fa.lastCoreBuyAt || 0) >= CORE_BUY_INTERVAL_MS;
-
-        // ขา core: ทยอยสะสมระยะยาวเป็นรอบเวลา ตราบใดที่ไม่ใช่ขาลงรุนแรง
-        if (coreDue && score > THRESHOLDS.strongSell) {
-          const coreAmount = Math.max(minTicket, cash * CORE_BUY_FRACTION);
-          const result = applyTrade(fl, "buy", coreAmount, price, feeRate);
-          if (result) {
-            // ทำเครื่องหมายไม้ล่าสุดเป็นขา core เพื่อไม่ให้ระบบขายออกอัตโนมัติ
-            const lots = result.ledger.lots.slice();
-            lots[lots.length - 1] = Object.assign({}, lots[lots.length - 1], { sleeve: "core" });
-            const newAuto = Object.assign({}, fa, { lastCoreBuyAt: now });
-            const equity = result.ledger.cash + result.ledger.btc * price;
-            tx.update(userRef, {
-              [`${ledgerKey}.cash`]: result.ledger.cash,
-              [`${ledgerKey}.btc`]: result.ledger.btc,
-              [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-              [`${ledgerKey}.lots`]: lots,
-              [`${ledgerKey}.autoTrade`]: newAuto,
-            });
-            const coreReason = `สะสมระยะยาว (core): ครบรอบสะสม ${(CORE_BUY_INTERVAL_MS / 3600000).toFixed(0)} ชั่วโมง และคะแนนรวม ${score.toFixed(1)} (${verdict}) ไม่ได้เป็นขาลงรุนแรง จึงทยอยซื้อเก็บ ${round2(result.amount)} (${(CORE_BUY_FRACTION * 100).toFixed(0)}% ของเงินสด) ได้ ${result.qty.toFixed(8)} BTC — ไม้ขานี้จะไม่ถูกขายอัตโนมัติ เก็บสะสมให้จำนวนเหรียญโตขึ้นระยะยาว`;
-            const tradeRef = db.collection("trades").doc();
-            tx.set(tradeRef, {
-              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
-              price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-              autoTrade: true, sleeve: "core", trigger: "core_dca", reason: coreReason, ts: Timestamp.now(),
-            });
-            await writeDecision(tx, uid, fresh.email, "buy", coreReason,
-              { trigger: "core_dca", sleeve: "core", btcBought: result.qty, amount: round2(result.amount) });
-            buyCount++; didSomething = true;
-            return;
-          }
         }
 
         // ขา swing: เข้าเทรด "เฉพาะไม้ยาว" เท่านั้น ไม่ไล่ซื้อไม้สั้นระหว่างทาง
