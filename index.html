@@ -89,6 +89,8 @@
         <button type="button" class="tf-btn" data-tf="5m">5m</button>
         <button type="button" class="tf-btn" data-tf="15m">15m</button>
         <button type="button" class="tf-btn" data-tf="1h">1H</button>
+        <button type="button" class="tf-btn" data-tf="1d">1D</button>
+        <button type="button" class="tf-btn" data-tf="1M">1M</button>
       </div>
     </div>
   </div>
@@ -182,7 +184,7 @@
         <input type="number" id="auto-trade-amount" placeholder="จำนวนเงินซื้อ (ถ้ายังไม่มีประวัติขาย)" min="0" step="10">
         <button type="button" class="btn btn-buy" id="btn-save-auto-trade" style="flex:0 0 auto;padding:9px 16px;">บันทึก</button>
       </div>
-      <div class="login-note" id="auto-trade-score" style="border:none;padding-top:0;font-size:12.5px;color:var(--text);">—</div>
+      <div class="score-box" id="auto-trade-score">—</div>
       <div class="login-note" id="auto-trade-status" style="border:none;padding-top:0;">—</div>
       <div class="login-note" id="auto-trade-signal" style="border:none;padding-top:0;">—</div>
       <div class="login-note" style="border:none;padding-top:0;"><b>เป้าหมาย: ได้จำนวน BTC เพิ่มขึ้น</b> (ไม่ใช่แค่กำไรเป็นเงิน) — ขายตอนราคาสูง แล้วบังคับซื้อคืนที่ราคาต่ำพอที่จะได้เหรียญกลับมามากกว่าเดิมอย่างน้อย 1% หลังหักค่าธรรมเนียมทั้งสองขาแล้ว ถ้าราคายังไม่ลงถึงจุดนั้นระบบจะถือเงินสดรอ ไม่ซื้อคืนแพงเด็ดขาด · ซื้อเมื่อสัญญาณรวมไม่ชี้ขาลง · ขายทำกำไร 2%/รอบ ตัดขาดทุนเฉพาะตอนจำเป็นจริงๆ (ขาดทุน 5% + ยืนยันขาลง) · ทำงานฝั่งเซิร์ฟเวอร์แม้ปิดหน้านี้ — เป็นแบบจำลองสถิติ ไม่ใช่คำแนะนำการลงทุน และไม่รับประกันกำไร</div>

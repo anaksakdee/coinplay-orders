@@ -196,7 +196,7 @@ function loadTradeHistory(){
 var SYMBOL = 'btcusdt';
 var KLINE_LIMIT = 120;
 var TF_STORAGE_KEY = 'coinplay-timeframe';
-var VALID_TFS = ['1m','5m','15m','1h'];
+var VALID_TFS = ['1m','5m','15m','1h','1d','1M'];
 function loadSavedTimeframe(){
   try {
     var v = localStorage.getItem(TF_STORAGE_KEY);
@@ -218,7 +218,12 @@ var reconnectTimer = null;
 // go through a free public CORS proxy. This is a third-party dependency — if it's
 // ever slow/down, the Bitkub tab's live data will be affected (Binance is unaffected).
 var BITKUB_PROXY_PREFIX = 'https://proxy.cors.sh/';
-var BITKUB_RES = { '1m':'1', '5m':'5', '15m':'15', '1h':'60' };
+var BITKUB_RES = { '1m':'1', '5m':'5', '15m':'15', '1h':'60', '1d':'1D', '1M':'1M' };
+function bitkubBarSeconds(res){
+  if (res==='1D') return 86400;
+  if (res==='1M') return 30*86400; // ประมาณค่าคร่าวๆ แค่ใช้กะช่วง from-to กว้างพอ ไม่ต้องเป๊ะ
+  return parseInt(res,10)*60;
+}
 var bitkubTickerTimer = null;
 var bitkubHistoryTimer = null;
 
@@ -1152,7 +1157,7 @@ function onMarketUpdate(){
 function loadBitkubHistory(tf){
   var res = BITKUB_RES[tf] || '1';
   var now = Math.floor(Date.now()/1000);
-  var barSeconds = (res==='60') ? 3600 : parseInt(res,10)*60;
+  var barSeconds = (res==='60') ? 3600 : bitkubBarSeconds(res);
   var from = now - barSeconds*KLINE_LIMIT;
   var url = BITKUB_PROXY_PREFIX+'https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution='+res+'&from='+from+'&to='+now;
   return fetch(url).then(function(r){ return r.json(); }).then(function(data){
