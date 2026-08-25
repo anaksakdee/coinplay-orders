@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CoinPlay — โปรไฟล์</title>
+<meta name="robots" content="noindex, nofollow" />
+<meta name="theme-color" content="#0b0f14" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+
+<div class="login-overlay" id="login-overlay">
+  <div class="login-card">
+    <div class="login-brand"><div class="mark">₿</div><div><h1>โปรไฟล์</h1><span>ประวัติการเทรดของคุณ</span></div></div>
+    <button class="btn-google" id="btn-google">เข้าสู่ระบบด้วย Google</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="app-root">
+  <div class="topbar">
+    <div class="brand"><div class="brand-mark">₿</div><div class="brand-text"><h1>โปรไฟล์ของฉัน</h1><span>ประวัติการเทรด &amp; ผลงานออโต้เทรด</span></div></div>
+    <div class="top-right">
+      <div class="user-chip"><img id="chip-avatar" src="" alt=""><span class="name" id="chip-name">—</span><a href="/index.html">หน้าเทรด</a><button id="btn-logout" type="button">ออกจากระบบ</button></div>
+    </div>
+  </div>
+
+  <div class="admin-stats" id="summary-stats"></div>
+
+  <div class="main-grid" style="grid-template-columns:1fr;">
+    <div class="panel">
+      <div class="panel-head"><h2>คำสั่งซื้อขายของฉัน</h2><span class="sub" id="trades-sub">ล่าสุด 200 รายการ — พร้อมเหตุผลถ้าระบบออโต้เทรดเป็นคนสั่ง</span></div>
+      <div class="decisions-wrap" id="my-trades-list"></div>
+    </div>
+  </div>
+
+  <p class="footer-note">หน้านี้แสดงเฉพาะข้อมูลบัญชีของคุณเอง — ต้องการวิเคราะห์เชิงลึกของระบบเทรด (อินดิเคเตอร์ทุกตัว, ผลการเรียนรู้จากข้อมูลย้อนหลัง) ดูได้ที่หน้าแอดมิน (เฉพาะผู้ดูแลระบบ)</p>
+</div>
+
+<script type="module" src="/src/profile.js"></script>
+</body>
+</html>
