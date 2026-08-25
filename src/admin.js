@@ -79,6 +79,7 @@ function loadDashboard(){
     renderUsersTable(users);
     renderTradesTable(trades);
     renderLogsTable(logs);
+    renderDecisions(logs);
   }).catch(function(err){
     console.error('admin load failed', err);
     document.getElementById('users-sub').textContent = 'โหลดข้อมูลไม่สำเร็จ: ' + err.message;
@@ -137,17 +138,77 @@ var LOG_LABELS = {
   signup: 'สมัคร', login: 'เข้าสู่ระบบ', logout: 'ออกจากระบบ',
   trade: 'เทรด', insufficient_funds: 'เงินไม่พอ', reset_account: 'รีเซตบัญชี', topup: 'เติมเงิน',
   order_created: 'ตั้งคำสั่งรอราคา', order_cancelled: 'ยกเลิกคำสั่งรอราคา', order_triggered: 'คำสั่งรอราคาทำงาน',
-  disclaimer_acknowledged: 'ยอมรับคำชี้แจง'
+  disclaimer_acknowledged: 'ยอมรับคำชี้แจง',
+  auto_decision: 'ระบบตัดสินใจ', dca_triggered: 'DCA อัตโนมัติ', auto_trade_triggered: 'ออโต้เทรด',
+  dca_settings_saved: 'ตั้งค่า DCA', auto_trade_settings_saved: 'ตั้งค่าออโต้เทรด'
 };
+
+var ACTION_LABELS = { buy: 'ซื้อ', sell: 'ขาย', hold: 'ถือรอ' };
+
+// แสดงค่าใน detail แบบอ่านได้ — object ซ้อนถูกกางเป็น JSON ย่อ ไม่ใช่ [object Object] เหมือนเดิม
+function flattenDetail(d){
+  if (d===null || d===undefined) return '';
+  if (typeof d !== 'object') return String(d);
+  try {
+    return Object.keys(d).map(function(k){
+      var v = d[k];
+      if (v && typeof v === 'object') return k+'='+JSON.stringify(v);
+      return k+'='+v;
+    }).join(', ');
+  } catch(e){ return ''; }
+}
 
 function renderLogsTable(logs){
   var tbody = document.querySelector('#logs-table tbody');
   tbody.innerHTML = logs.map(function(l){
     var label = LOG_LABELS[l.type] || l.type;
     var pillClass = l.type==='trade' ? 'pill-buy' : (l.type==='insufficient_funds' ? 'pill-sell' : 'pill-neutral');
-    var detail = '';
-    try { detail = Object.keys(l.detail||{}).map(function(k){ return k+'='+l.detail[k]; }).join(', '); } catch(e){}
+    var detail = flattenDetail(l.detail);
     return '<tr><td>'+fmtTime(tsToMs(l.ts))+'</td><td>'+esc(l.email)+'</td>' +
       '<td><span class="pill '+pillClass+'">'+esc(label)+'</span></td><td>'+esc(detail)+'</td></tr>';
   }).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-faint);">ยังไม่มีกิจกรรม</td></tr>';
+}
+
+// พาเนลเฉพาะ "เหตุผลการตัดสินใจของระบบเทรดอัตโนมัติ" — กางให้อ่านง่ายว่าทำไมถึงซื้อ/ขาย/ถือ
+function renderDecisions(logs){
+  var el = document.getElementById('decisions-list');
+  if (!el) return;
+  var rows = logs.filter(function(l){ return l.type==='auto_decision'; });
+  if (!rows.length){
+    el.innerHTML = '<div class="history-empty">ยังไม่มีการตัดสินใจของระบบอัตโนมัติ — เปิดใช้งานออโต้เทรดในหน้าหลักก่อน แล้วระบบจะบันทึกเหตุผลทุกครั้งที่เช็คตลาด (ทุก ~5 นาที)</div>';
+    return;
+  }
+  el.innerHTML = rows.map(function(l){
+    var d = l.detail || {};
+    var m = d.market_analysis || {};
+    var action = d.action || 'hold';
+    var actClass = action==='buy' ? 'pill-buy' : action==='sell' ? 'pill-sell' : 'pill-neutral';
+    var scoreTxt = m.score!=null ? m.score.toFixed ? m.score.toFixed(1) : m.score : '—';
+    var inds = (m.indicators||[]).map(function(i){
+      var s = typeof i.score==='number' ? i.score.toFixed(0) : i.score;
+      var cls = i.score>0 ? 'ind-pos' : i.score<0 ? 'ind-neg' : '';
+      return '<div class="ind-row"><span class="ind-name">'+esc(i.name)+'</span>' +
+             '<span class="ind-score '+cls+'">'+esc(String(s))+'</span>' +
+             '<span class="ind-note">'+esc(i.note||'')+'</span></div>';
+    }).join('');
+    var extras = Object.keys(d).filter(function(k){
+      return ['action','reason','market_analysis','source','market'].indexOf(k)===-1;
+    }).map(function(k){
+      var v = d[k];
+      if (v && typeof v==='object') v = JSON.stringify(v);
+      return '<span class="dec-chip">'+esc(k)+': '+esc(String(v))+'</span>';
+    }).join('');
+
+    return '<div class="dec-card">' +
+      '<div class="dec-head">' +
+        '<span class="pill '+actClass+'">'+esc(ACTION_LABELS[action]||action)+'</span>' +
+        '<span class="pill pill-neutral">'+esc(MARKET_LABELS[d.market]||d.market||'')+'</span>' +
+        '<span class="dec-score">คะแนน '+esc(String(scoreTxt))+' · '+esc(m.verdict||'')+'</span>' +
+        '<span class="dec-time">'+fmtTime(tsToMs(l.ts))+' · '+esc(l.email||'')+'</span>' +
+      '</div>' +
+      '<div class="dec-reason">'+esc(d.reason||'')+'</div>' +
+      (inds ? '<details class="dec-details"><summary>ดูรายละเอียดอินดิเคเตอร์ '+(m.indicators||[]).length+' ตัว</summary><div class="ind-list">'+inds+'</div></details>' : '') +
+      (extras ? '<div class="dec-chips">'+extras+'</div>' : '') +
+    '</div>';
+  }).join('');
 }

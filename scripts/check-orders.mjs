@@ -3,6 +3,7 @@
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { computeReturns, computeSignal } from "../shared/signals.mjs";
+import { scoreMarket, describeScore, positionFraction, THRESHOLDS } from "../shared/strategy.mjs";
 
 const FEE_RATES = { binance: 0.001, bitkub: 0.0025 };
 const LEDGER_KEY = { binance: "usd", bitkub: "thb" };
@@ -19,6 +20,10 @@ function btcAccumCeiling(sellPrice, feeRate, gain) {
 }
 const AUTO_TRADE_BUY_COOLDOWN_MS = 60 * 60 * 1000; // ห่างกันอย่างน้อย 1 ชม.ต่อการซื้ออัตโนมัติ 1 ครั้ง กันซื้อรัวทุก 5 นาทีตอนราคานิ่งต่ำกว่าเป้า
 const KLINE_LIMIT = 120;
+const CORE_BUY_INTERVAL_MS = 12 * 60 * 60 * 1000; // ขาสะสมระยะยาว: ทยอยซื้อทุก 12 ชั่วโมง
+const CORE_BUY_FRACTION = 0.10; // ใช้เงินสด 10% ต่อการสะสมระยะยาว 1 ครั้ง
+
+function round2(n) { return Math.round(n * 100) / 100; }
 
 function getServiceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -351,30 +356,52 @@ function signalSummary(signal) {
   }
   return { techniques, bearishVotes: signal.bearishVotes, bullishVotes: signal.bullishVotes, totalVotes: signal.totalVotes, bearish: signal.bearish, bullish: signal.bullish };
 }
-
-// ออโต้เทรดเต็มรูปแบบ — ใช้สัญญาณรวม (Monte Carlo + RSI + EMA trend + Bollinger Bands + MACD) ตัดสินใจซื้อ/ขายเอง
-// นโยบาย: ซื้อราคาต่ำ-ขายราคาสูง เพื่อ "เก็บสะสมเหรียญ" ไม่ใช่ไล่ซื้ออย่างเดียว
-//   ซื้อ: ต้องถึงจุดซื้อที่คำนวณไว้ (ต่ำกว่าราคาขายล่าสุด หรือแนวรับที่คาดการณ์) และสัญญาณรวมต้องไม่ชี้ขาลง (ไม่ใช่ bearish) และไม่ overbought
-//   ขาย: ขายทำกำไรเมื่อถึงเป้าหมาย 2% ต่อรอบ — ปกติจะถือรอจนกำไรจริงเสมอ
-//        ตัดขาดทุนเฉพาะตอน "จำเป็นจริงๆ" เท่านั้น: ขาดทุนหนักถึง 5% ต่อรอบ และสัญญาณรวมยืนยันเป็นขาลงชัดเจน (เสียงข้างมากจาก 5 เทคนิค)
+// ออโต้เทรดอัตโนมัติ 100% — ตัดสินใจเองทั้งซื้อและขาย โดยให้คะแนนถ่วงน้ำหนักจากหลายเทคนิค (ดู shared/strategy.mjs)
+// เป้าหมายคือ "จำนวน BTC ที่เพิ่มขึ้น" ทั้งระยะสั้นและระยะยาว จึงแบ่งเงินเป็น 2 ขา:
+//   core  = สะสมระยะยาว ทยอยซื้อเก็บเรื่อยๆ ไม่ขายออกอัตโนมัติ (จำนวนเหรียญโตตามเวลา)
+//   swing = เทรดสั้น ขายตอนแพง ซื้อคืนตอนถูก โดยบังคับให้ซื้อคืนได้เหรียญมากกว่าที่ขายไปเสมอ
+// ทุกการตัดสินใจ (รวม "ไม่ทำอะไร") ถูกบันทึกลง logs พร้อมเหตุผลภาษาไทย ให้แอดมินย้อนอ่านและเอาไปปรับกลยุทธ์ได้
 async function processAutoTrade(db, market, price, candles) {
-  if (!price || !candles || candles.length < 25) {
+  if (!price || !candles || candles.length < 30) {
     console.log(`[auto:${market}] no price/candles, skipping`);
     return;
   }
   const feeRate = FEE_RATES[market];
   const ledgerKey = LEDGER_KEY[market];
   const returns = computeReturns(candles);
-  const signal = computeSignal(price, candles, returns);
-  if (!signal.forecast) {
-    console.log(`[auto:${market}] not enough data for signal, skipping`);
-    return;
-  }
-  console.log(`[auto:${market}] price=${price} bearish=${signal.bearish} bullish=${signal.bullish} (${signal.bearishVotes}b/${signal.bullishVotes}u of ${signal.totalVotes}) rsi=${signal.rsi ? signal.rsi.toFixed(1) : "n/a"} probUp=${signal.forecast.probUp.toFixed(2)} macdHist=${signal.macd ? signal.macd.histogram.toFixed(2) : "n/a"}`);
+  const analysis = scoreMarket(price, candles, returns);
+  const score = analysis.composite;
+  const verdict = describeScore(score);
+
+  console.log(`[auto:${market}] price=${price} score=${score.toFixed(1)} (${verdict}) atr%=${analysis.atrPct ? analysis.atrPct.toFixed(3) : "n/a"}`);
 
   const usersSnap = await db.collection("users").get();
   const now = Date.now();
-  let sellCount = 0, buyCount = 0;
+  let sellCount = 0, buyCount = 0, holdCount = 0;
+
+  // ข้อมูลอินดิเคเตอร์ชุดเดียวกันแนบไปกับ log ทุกใบ เพื่อให้ย้อนวิเคราะห์ได้ว่าตอนนั้นตลาดเป็นยังไง
+  const marketSnapshot = {
+    price: round2(price),
+    score: round2(score),
+    verdict,
+    atrPct: analysis.atrPct != null ? round2(analysis.atrPct) : null,
+    percentB: analysis.pctB != null ? round2(analysis.pctB) : null,
+    roc10: analysis.roc != null ? round2(analysis.roc) : null,
+    indicators: analysis.parts.map((p) => ({
+      name: p.key, score: round2(p.score), weight: p.weight, note: p.text,
+    })),
+    legacyVotes: signalSummary(analysis.signal),
+  };
+
+  async function writeDecision(tx, uid, email, action, reasonText, extra) {
+    const logRef = db.collection("logs").doc();
+    tx.set(logRef, {
+      uid, email: email || null,
+      type: "auto_decision",
+      detail: Object.assign({ market, action, reason: reasonText, market_analysis: marketSnapshot, source: "background" }, extra || {}),
+      ts: Timestamp.now(),
+    });
+  }
 
   for (const userDoc of usersSnap.docs) {
     const uid = userDoc.id;
@@ -383,36 +410,52 @@ async function processAutoTrade(db, market, price, candles) {
     const autoTrade = ledger && ledger.autoTrade;
     if (!autoTrade || !autoTrade.enabled) continue;
     const userRef = db.collection("users").doc(uid);
+    let didSomething = false;
 
-    // 1) เช็คขายทำกำไร/ตัดขาดทุน ทีละรอบที่เข้าเงื่อนไข (ไม่จำเป็นต้องเป็นรอบเก่าสุด) — ทำได้หลายรอบต่อการรันครั้งเดียว
-    // จำกัดจำนวนรอบสูงสุดต่อผู้ใช้ต่อการรัน กันวนซ้ำไม่รู้จบหากมีบั๊กที่ยังไม่รู้ตัวในอนาคต
-    let keepChecking = true;
-    let safetyGuard = 0;
-    while (keepChecking && safetyGuard < 30) {
-      keepChecking = false;
-      safetyGuard++;
+    // ---------- 1) ขา swing: พิจารณาขายทำกำไร ----------
+    // ขายเมื่อ (ก) ถึงเป้ากำไรที่ตั้งไว้ หรือ (ข) มีกำไรแล้วและสัญญาณเอนขาลงชัด (ล็อกกำไรก่อนโดนกลืน)
+    // หรือ (ค) ขาดทุนหนักและขาลงชัดเจนจริงๆ (ตัดขาดทุน)
+    let keepChecking = true, guard = 0;
+    while (keepChecking && guard < 30) {
+      keepChecking = false; guard++;
       try {
         await db.runTransaction(async (tx) => {
           const snap = await tx.get(userRef);
           const fresh = snap.data();
-          const freshLedger = fresh[ledgerKey];
-          const freshAuto = freshLedger && freshLedger.autoTrade;
-          if (!freshAuto || !freshAuto.enabled || !freshLedger.lots || !freshLedger.lots.length) return;
+          const fl = fresh[ledgerKey];
+          const fa = fl && fl.autoTrade;
+          if (!fa || !fa.enabled || !fl.lots || !fl.lots.length) return;
 
-          // สแกนหารอบแรกที่เข้าเงื่อนไข (ไม่ใช่แค่รอบเก่าสุด): ได้กำไรถึงเป้า หรือ "จำเป็นต้องตัดขาดทุน" จริงๆ
-          // (ขาดทุนหนักถึง 5% + สัญญาณรวมยืนยันขาลงชัดเจน ไม่ใช่แค่ผันผวนระยะสั้น) — ไม่ใช่ตัดขาดทุนพร่ำเพรื่อ
-          let lot = null, atTarget = false, atRisk = false;
-          for (const l of freshLedger.lots) {
+          // ขา core ไม่ขายอัตโนมัติ — คัดเฉพาะไม้ swing
+          const swingLots = fl.lots.filter((l) => l.sleeve !== "core");
+          if (!swingLots.length) return;
+
+          let lot = null, why = null, reasonText = null;
+          for (const l of swingLots) {
             const targetSell = l.price * (1 + PROFIT_TARGET) / (1 - feeRate);
             const stopLoss = l.price * (1 - STOP_LOSS_PCT);
-            const t = price >= targetSell;
-            const r = !t && signal.bearish && price <= stopLoss;
-            if (t || r) { lot = l; atTarget = t; atRisk = r; break; }
+            const pnlPct = (price / l.price - 1) * 100;
+            const netPnlPct = (price * (1 - feeRate) / (l.price * (1 + feeRate)) - 1) * 100;
+
+            if (price >= targetSell) {
+              lot = l; why = "profit_target";
+              reasonText = `ขายทำกำไรตามเป้า: ไม้นี้ซื้อไว้ที่ ${round2(l.price)} ตอนนี้ราคา ${round2(price)} (+${pnlPct.toFixed(2)}%) ผ่านเป้าหมาย ${(PROFIT_TARGET * 100).toFixed(1)}% หลังหักค่าธรรมเนียมแล้ว จึงขายล็อกกำไรไว้ก่อน แล้วรอซื้อคืนตอนราคาย่อเพื่อให้ได้เหรียญกลับมามากกว่าเดิม`;
+              break;
+            }
+            if (netPnlPct > 0.3 && score <= THRESHOLDS.strongSell) {
+              lot = l; why = "lock_profit_bearish";
+              reasonText = `ขายล็อกกำไรก่อนขาลง: ไม้นี้ซื้อที่ ${round2(l.price)} ตอนนี้กำไรสุทธิ +${netPnlPct.toFixed(2)}% แม้ยังไม่ถึงเป้า ${(PROFIT_TARGET * 100).toFixed(1)}% แต่คะแนนรวมตกลงมาที่ ${score.toFixed(1)} (${verdict}) จึงรีบเก็บกำไรไว้ก่อนที่ราคาจะย้อนกลับลงไปกินกำไรที่มีอยู่`;
+              break;
+            }
+            if (price <= stopLoss && score <= THRESHOLDS.strongSell) {
+              lot = l; why = "stop_loss";
+              reasonText = `ตัดขาดทุน: ไม้นี้ซื้อที่ ${round2(l.price)} ตอนนี้ราคา ${round2(price)} (${pnlPct.toFixed(2)}%) ขาดทุนเกินเกณฑ์ ${(STOP_LOSS_PCT * 100).toFixed(0)}% และคะแนนรวม ${score.toFixed(1)} ยืนยันว่าเป็นขาลงชัดเจน จึงตัดขาดทุนเพื่อเอาเงินสดไปรอซื้อคืนที่ราคาต่ำกว่า (ได้เหรียญกลับมามากกว่าถือค้างไว้)`;
+              break;
+            }
           }
           if (!lot) return;
 
-          // ขายเจาะจงล็อตที่เข้าเงื่อนไขตัวนั้นโดยตรง (ไม่ใช่ applyTrade แบบ FIFO ทั่วไป — ดูเหตุผลที่ sellSpecificLot)
-          const result = sellSpecificLot(freshLedger, lot, price, feeRate);
+          const result = sellSpecificLot(fl, lot, price, feeRate);
           if (!result) return;
           const equity = result.ledger.cash + result.ledger.btc * price;
           const lastSell = { price, usd: result.amount, qty: result.qty, ts: now };
@@ -432,131 +475,213 @@ async function processAutoTrade(db, market, price, candles) {
             autoTrade: true, ts: Timestamp.now(),
           });
 
-          const logRef = db.collection("logs").doc();
-          tx.set(logRef, {
-            uid, email: fresh.email || null, type: "auto_trade_triggered",
-            detail: {
-              market, side: "sell", reason: atTarget ? "profit_target" : "stop_loss",
-              price: Math.round(price * 100) / 100, amount: Math.round(result.amount * 100) / 100, source: "background",
-              lotBoughtAt: lot.price, signals: signalSummary(signal),
-            },
-            ts: Timestamp.now(),
+          await writeDecision(tx, uid, fresh.email, "sell", reasonText, {
+            trigger: why,
+            lotBoughtAt: round2(lot.price),
+            btcSold: result.qty,
+            proceeds: round2(result.amount),
+            pnlPct: round2((price / lot.price - 1) * 100),
+            nextStep: `ตั้งเพดานซื้อคืนไว้ที่ ${round2(btcAccumCeiling(price, feeRate, BTC_ACCUM_TARGET))} — จะซื้อคืนก็ต่อเมื่อราคาลงต่ำกว่านี้ เพื่อให้ได้เหรียญเพิ่มอย่างน้อย ${(BTC_ACCUM_TARGET * 100).toFixed(1)}%`,
           });
 
-          sellCount++;
-          keepChecking = true; // เช็ครอบถัดไปต่อ เผื่อมีหลายรอบที่เข้าเงื่อนไขพร้อมกัน
+          sellCount++; didSomething = true;
+          keepChecking = true;
         });
       } catch (err) {
-        console.error(`[auto:${market}] sell check failed for user ${uid}:`, err.message);
+        console.error(`[auto:${market}] sell failed for ${uid}:`, err.message);
         keepChecking = false;
       }
     }
 
-    // 2) เช็คซื้อ (มีคูลดาวน์ 1 ชม./ครั้ง กันซื้อรัวตอนราคานิ่งต่ำกว่าเป้าหลายรอบติด)
+    // ---------- 2) พิจารณาซื้อ (ทั้งขา swing และขา core) ----------
     try {
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(userRef);
         const fresh = snap.data();
-        const freshLedger = fresh[ledgerKey];
-        const freshAuto = freshLedger && freshLedger.autoTrade;
-        if (!freshAuto || !freshAuto.enabled) return;
-        if (now - (freshAuto.lastBuyAt || 0) < AUTO_TRADE_BUY_COOLDOWN_MS) return;
-        if (signal.overbought) return; // RSI สูงเกินไป ข้ามรอบซื้อนี้เพื่อความปลอดภัย
-        if (signal.bearish) return; // สัญญาณรวมชี้ขาลง ("ต้องดูสัญญาณก่อน") — ไม่ซื้อสวนแนวโน้มขาลง
+        const fl = fresh[ledgerKey];
+        const fa = fl && fl.autoTrade;
+        if (!fa || !fa.enabled) return;
 
-        const lastSell = freshLedger.lastSell;
-        const forecastFloor = signal.forecast.p10;
-        const possibleDropPct = Math.max(0, (price - forecastFloor) / price * 100);
-        const limitedDownside = possibleDropPct < PROFIT_TARGET * 100;
-        const mechanicalTarget = lastSell ? lastSell.price / (1 + PROFIT_TARGET) : null;
-        let targetPrice, buyReason;
-        if (limitedDownside) { targetPrice = Math.min(price, forecastFloor); buyReason = "forecast_floor"; }
-        else if (mechanicalTarget != null) { targetPrice = mechanicalTarget; buyReason = "edge_vs_last_sell"; }
-        else { targetPrice = forecastFloor; buyReason = "forecast_floor"; }
+        const cash = fl.cash || 0;
+        const lastSell = fl.lastSell;
+        const minTicket = market === "bitkub" ? 20 : 1; // ไม้เล็กกว่านี้ไม่คุ้มค่าธรรมเนียม
+        const blockers = [];
 
-        // เพดานบังคับ: ถ้ากำลังซื้อคืนหลังจากขายไป ราคาซื้อคืนต้องต่ำพอที่จะได้ "จำนวนเหรียญเพิ่มขึ้น" จริง
-        // จุดนี้สำคัญที่สุดต่อเป้าหมายสะสม BTC — ไม่ว่าโมเดลจะมองบวกแค่ไหนก็ห้ามซื้อคืนแพงกว่าเพดานนี้
-        // (ก่อนหน้านี้มีบั๊ก: ตอน limitedDownside และโมเดลคาดว่าราคาจะขึ้น targetPrice จะกลายเป็นราคาตลาดปัจจุบัน
-        //  ทำให้ซื้อคืนที่ราคาเดียวกับที่เพิ่งขาย = เสียเหรียญให้ค่าธรรมเนียมทุกรอบ)
+        // 2a) ถ้ามีเงินค้างจากการขายรอบก่อน -> ต้องซื้อคืนให้ได้เหรียญมากกว่าเดิมเท่านั้น
         if (lastSell && lastSell.qty > 0) {
           const ceiling = btcAccumCeiling(lastSell.price, feeRate, BTC_ACCUM_TARGET);
-          if (targetPrice > ceiling) { targetPrice = ceiling; buyReason = "btc_accumulation_ceiling"; }
-        }
-        if (price > targetPrice) return; // ยังไม่ถึงจุดซื้อ
+          if (price > ceiling) {
+            const gapPct = (price / ceiling - 1) * 100;
+            await writeDecision(tx, uid, fresh.email, "hold",
+              `รอซื้อคืน: ขายไปแล้ว ${lastSell.qty.toFixed(8)} BTC ที่ราคา ${round2(lastSell.price)} ตอนนี้ราคา ${round2(price)} ยังสูงกว่าเพดานซื้อคืน ${round2(ceiling)} อยู่ ${gapPct.toFixed(2)}% ถ้าซื้อคืนตอนนี้จะได้เหรียญน้อยกว่าที่ขายไป (เสียให้ค่าธรรมเนียม 2 ขา) จึงถือเงินสดรอให้ราคาย่อลงมาก่อน`,
+              { trigger: "waiting_rebuy", rebuyCeiling: round2(ceiling), gapToCeilingPct: round2(gapPct), cashIdle: round2(cash) });
+            holdCount++;
+            return;
+          }
+          // ราคาถึงเพดานแล้ว -> ซื้อคืนด้วยเงินจากการขายรอบนั้นพอดี
+          const buyAmount = (lastSell.usd * (1 - feeRate)) / (1 + feeRate);
+          const result = applyTrade(fl, "buy", buyAmount, price, feeRate);
+          if (!result) return;
+          const btcDelta = result.qty - lastSell.qty;
+          const newAuto = Object.assign({}, fa, {
+            lastBuyAt: now,
+            roundTrips: (fa.roundTrips || 0) + 1,
+            btcAccumulated: (fa.btcAccumulated || 0) + btcDelta,
+          });
+          const equity = result.ledger.cash + result.ledger.btc * price;
 
-        // ซื้อคืนด้วย "เงินที่ได้จากการขายรอบนั้น" พอดี (ไม่กินเงินสดส่วนอื่นในบัญชี)
-        // lastSell.usd เป็นยอดก่อนหักค่าธรรมเนียม เงินสดที่ได้จริง = usd*(1-f) และเวลาซื้อต้องกันค่าธรรมเนียมไว้อีก (1+f)
-        const buyAmount = lastSell && lastSell.usd > 0
-          ? (lastSell.usd * (1 - feeRate)) / (1 + feeRate)
-          : freshAuto.buyAmount;
-        if (!(buyAmount > 0)) return;
-
-        const result = applyTrade(freshLedger, "buy", buyAmount, price, feeRate);
-        const newAuto = {
-          enabled: freshAuto.enabled, buyAmount: freshAuto.buyAmount, lastBuyAt: freshAuto.lastBuyAt || null,
-          roundTrips: freshAuto.roundTrips || 0, btcAccumulated: freshAuto.btcAccumulated || 0,
-        };
-        if (!result) {
-          tx.update(userRef, { [`${ledgerKey}.autoTrade`]: newAuto });
+          tx.update(userRef, {
+            [`${ledgerKey}.cash`]: result.ledger.cash,
+            [`${ledgerKey}.btc`]: result.ledger.btc,
+            [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
+            [`${ledgerKey}.lots`]: result.ledger.lots,
+            [`${ledgerKey}.autoTrade`]: newAuto,
+            [`${ledgerKey}.lastSell`]: null,
+          });
+          const tradeRef = db.collection("trades").doc();
+          tx.set(tradeRef, {
+            uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
+            price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
+            autoTrade: true, ts: Timestamp.now(),
+          });
+          await writeDecision(tx, uid, fresh.email, "buy",
+            `ซื้อคืนปิดรอบสำเร็จ: ราคาลงมาที่ ${round2(price)} ต่ำกว่าเพดาน ${round2(btcAccumCeiling(lastSell.price, feeRate, BTC_ACCUM_TARGET))} แล้ว จึงซื้อคืนด้วยเงินที่ได้จากการขายรอบนั้น ขายไป ${lastSell.qty.toFixed(8)} BTC ซื้อกลับได้ ${result.qty.toFixed(8)} BTC เพิ่มขึ้น ${btcDelta >= 0 ? "+" : ""}${(result.qty / lastSell.qty * 100 - 100).toFixed(3)}% — นี่คือกำไรที่เป็นจำนวนเหรียญจริง`,
+            {
+              trigger: "rebuy_complete", sleeve: "swing",
+              btcSold: lastSell.qty, btcBought: result.qty, btcDelta,
+              btcDeltaPct: round2((result.qty / lastSell.qty - 1) * 100),
+              roundTrips: newAuto.roundTrips, btcAccumulatedTotal: newAuto.btcAccumulated,
+            });
+          buyCount++; didSomething = true;
           return;
         }
-        newAuto.lastBuyAt = now;
 
-        // จบรอบเทรดครบวง (ขาย -> ซื้อคืน) วัดผลเป็น "จำนวนเหรียญที่ได้เพิ่ม" ตามเป้าหมายจริงของระบบ
-        const btcDelta = lastSell && lastSell.qty > 0 ? result.qty - lastSell.qty : null;
-        if (btcDelta != null) {
-          newAuto.roundTrips = (freshAuto.roundTrips || 0) + 1;
-          newAuto.btcAccumulated = (freshAuto.btcAccumulated || 0) + btcDelta;
+        // 2b) ไม่มีเงินค้างรอซื้อคืน -> พิจารณาเปิดไม้ใหม่ตามคะแนนสัญญาณ
+        if (cash < minTicket) {
+          await writeDecision(tx, uid, fresh.email, "hold",
+            `ไม่ซื้อ: เงินสดคงเหลือ ${round2(cash)} น้อยเกินกว่าจะเปิดไม้ใหม่ได้ (ขั้นต่ำ ${minTicket}) — เงินถูกแปลงเป็น BTC ไปเกือบหมดแล้ว ระบบจะรอจังหวะขายทำกำไรเพื่อให้มีเงินสดกลับมาหมุนต่อ`,
+            { trigger: "no_cash", cash: round2(cash) });
+          holdCount++;
+          return;
         }
 
+        const cooldownLeft = AUTO_TRADE_BUY_COOLDOWN_MS - (now - (fa.lastBuyAt || 0));
+        const coreDue = now - (fa.lastCoreBuyAt || 0) >= CORE_BUY_INTERVAL_MS;
+
+        // ขา core: ทยอยสะสมระยะยาวเป็นรอบเวลา ตราบใดที่ไม่ใช่ขาลงรุนแรง
+        if (coreDue && score > THRESHOLDS.strongSell) {
+          const coreAmount = Math.max(minTicket, cash * CORE_BUY_FRACTION);
+          const result = applyTrade(fl, "buy", coreAmount, price, feeRate);
+          if (result) {
+            // ทำเครื่องหมายไม้ล่าสุดเป็นขา core เพื่อไม่ให้ระบบขายออกอัตโนมัติ
+            const lots = result.ledger.lots.slice();
+            lots[lots.length - 1] = Object.assign({}, lots[lots.length - 1], { sleeve: "core" });
+            const newAuto = Object.assign({}, fa, { lastCoreBuyAt: now });
+            const equity = result.ledger.cash + result.ledger.btc * price;
+            tx.update(userRef, {
+              [`${ledgerKey}.cash`]: result.ledger.cash,
+              [`${ledgerKey}.btc`]: result.ledger.btc,
+              [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
+              [`${ledgerKey}.lots`]: lots,
+              [`${ledgerKey}.autoTrade`]: newAuto,
+            });
+            const tradeRef = db.collection("trades").doc();
+            tx.set(tradeRef, {
+              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
+              price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
+              autoTrade: true, sleeve: "core", ts: Timestamp.now(),
+            });
+            await writeDecision(tx, uid, fresh.email, "buy",
+              `สะสมระยะยาว (core): ครบรอบสะสม ${(CORE_BUY_INTERVAL_MS / 3600000).toFixed(0)} ชั่วโมง และคะแนนรวม ${score.toFixed(1)} (${verdict}) ไม่ได้เป็นขาลงรุนแรง จึงทยอยซื้อเก็บ ${round2(result.amount)} (${(CORE_BUY_FRACTION * 100).toFixed(0)}% ของเงินสด) ได้ ${result.qty.toFixed(8)} BTC — ไม้ขานี้จะไม่ถูกขายอัตโนมัติ เก็บสะสมให้จำนวนเหรียญโตขึ้นระยะยาว`,
+              { trigger: "core_dca", sleeve: "core", btcBought: result.qty, amount: round2(result.amount) });
+            buyCount++; didSomething = true;
+            return;
+          }
+        }
+
+        // ขา swing: ซื้อเมื่อคะแนนถึงเกณฑ์
+        if (score < THRESHOLDS.weakBuy) blockers.push(`คะแนนรวม ${score.toFixed(1)} ยังต่ำกว่าเกณฑ์ซื้อ ${THRESHOLDS.weakBuy}`);
+        if (cooldownLeft > 0) blockers.push(`ติดคูลดาวน์อีก ${Math.ceil(cooldownLeft / 60000)} นาที (กันซื้อถี่เกินไป)`);
+
+        if (blockers.length) {
+          const topReasons = analysis.parts.slice().sort((a, b) => Math.abs(b.score * b.weight) - Math.abs(a.score * a.weight)).slice(0, 3);
+          await writeDecision(tx, uid, fresh.email, "hold",
+            `ยังไม่เข้าเงื่อนไขซื้อ: ${blockers.join(" และ ")} — สรุปสภาพตลาดตอนนี้: ${verdict} (คะแนน ${score.toFixed(1)}) ปัจจัยที่มีน้ำหนักที่สุดคือ ${topReasons.map((r) => r.text).join(" | ")}`,
+            { trigger: "below_threshold", blockers, cash: round2(cash) });
+          holdCount++;
+          return;
+        }
+
+        const frac = positionFraction(score, analysis.atrPct);
+        const amount = Math.max(minTicket, cash * frac);
+        const result = applyTrade(fl, "buy", amount, price, feeRate);
+        if (!result) return;
+        const newAuto = Object.assign({}, fa, { lastBuyAt: now });
         const equity = result.ledger.cash + result.ledger.btc * price;
-        const updatePayload = {
+        tx.update(userRef, {
           [`${ledgerKey}.cash`]: result.ledger.cash,
           [`${ledgerKey}.btc`]: result.ledger.btc,
           [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
           [`${ledgerKey}.lots`]: result.ledger.lots,
           [`${ledgerKey}.autoTrade`]: newAuto,
-        };
-        // ปิดรอบแล้ว ล้าง lastSell ทิ้ง กันไม่ให้รอบถัดไปนับซ้ำกับการขายเดิม (และไม่ให้ติดเพดานของรอบที่จบไปแล้ว)
-        if (btcDelta != null) updatePayload[`${ledgerKey}.lastSell`] = null;
-        tx.update(userRef, updatePayload);
-
+        });
         const tradeRef = db.collection("trades").doc();
         tx.set(tradeRef, {
           uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
           price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-          autoTrade: true, ts: Timestamp.now(),
+          autoTrade: true, sleeve: "swing", ts: Timestamp.now(),
         });
-
-        const logRef = db.collection("logs").doc();
-        tx.set(logRef, {
-          uid, email: fresh.email || null, type: "auto_trade_triggered",
-          detail: {
-            market, side: "buy", reason: buyReason,
-            price: Math.round(price * 100) / 100, amount: Math.round(result.amount * 100) / 100, source: "background",
-            targetPrice: Math.round(targetPrice * 100) / 100, signals: signalSummary(signal),
-            // ผลลัพธ์ที่เป็นเป้าหมายจริงของระบบ: รอบนี้ได้เหรียญเพิ่มขึ้นกี่เหรียญ / กี่เปอร์เซ็นต์
-            btcSold: btcDelta != null ? lastSell.qty : null,
-            btcBought: result.qty,
-            btcDelta: btcDelta,
-            btcDeltaPct: btcDelta != null ? Math.round((result.qty / lastSell.qty - 1) * 10000) / 100 : null,
-            btcAccumulatedTotal: newAuto.btcAccumulated,
-            roundTrips: newAuto.roundTrips,
-          },
-          ts: Timestamp.now(),
-        });
-        if (btcDelta != null) {
-          console.log(`[auto:${market}] round trip closed for ${uid}: sold ${lastSell.qty.toFixed(8)} -> bought ${result.qty.toFixed(8)} BTC (${(result.qty / lastSell.qty * 100 - 100).toFixed(3)}%)`);
-        }
-
-        buyCount++;
+        const topReasons = analysis.parts.slice().sort((a, b) => b.score * b.weight - a.score * a.weight).slice(0, 3);
+        await writeDecision(tx, uid, fresh.email, "buy",
+          `เปิดไม้เทรดสั้น (swing): คะแนนรวม ${score.toFixed(1)} = ${verdict} ผ่านเกณฑ์ซื้อ ${THRESHOLDS.weakBuy} จึงลงเงิน ${round2(result.amount)} (${(frac * 100).toFixed(0)}% ของเงินสด ปรับขนาดตามความมั่นใจและความผันผวน ATR ${analysis.atrPct ? analysis.atrPct.toFixed(2) + "%" : "n/a"}) ได้ ${result.qty.toFixed(8)} BTC — เหตุผลหลักที่เข้าซื้อ: ${topReasons.map((r) => r.text).join(" | ")} — จะขายทำกำไรเมื่อราคาขึ้นถึง ${round2(price * (1 + PROFIT_TARGET) / (1 - feeRate))}`,
+          {
+            trigger: "signal_buy", sleeve: "swing",
+            btcBought: result.qty, amount: round2(result.amount),
+            positionFractionPct: round2(frac * 100),
+            targetSellPrice: round2(price * (1 + PROFIT_TARGET) / (1 - feeRate)),
+          });
+        buyCount++; didSomething = true;
       });
     } catch (err) {
-      console.error(`[auto:${market}] buy check failed for user ${uid}:`, err.message);
+      console.error(`[auto:${market}] buy failed for ${uid}:`, err.message);
+    }
+
+    if (!didSomething) {
+      // ไม่มีทั้งซื้อและขาย และยังไม่ได้บันทึกเหตุผลไว้ (เช่นแค่ถือไม้รอราคาขึ้น) -> บันทึกสถานะการถือไว้ด้วย
+      try {
+        const snap = await userRef.get();
+        const fl = snap.data()[ledgerKey];
+        if (fl && fl.lots && fl.lots.length && !(fl.lastSell && fl.lastSell.qty > 0)) {
+          const swingLots = fl.lots.filter((l) => l.sleeve !== "core");
+          if (swingLots.length) {
+            const nearest = swingLots.reduce((best, l) => {
+              const t = l.price * (1 + PROFIT_TARGET) / (1 - feeRate);
+              return !best || t < best.target ? { lot: l, target: t } : best;
+            }, null);
+            const distPct = (nearest.target / price - 1) * 100;
+            await db.collection("logs").add({
+              uid, email: data.email || null, type: "auto_decision",
+              detail: {
+                market, action: "hold", source: "background", trigger: "holding_position",
+                reason: `ถือไม้รอราคาขึ้น: มีไม้เทรดสั้นค้างอยู่ ${swingLots.length} ไม้ ไม้ที่ใกล้ถึงเป้าที่สุดซื้อไว้ที่ ${round2(nearest.lot.price)} ต้องรอราคาขึ้นไปถึง ${round2(nearest.target)} (อีก ${distPct.toFixed(2)}%) ถึงจะขายทำกำไร ตอนนี้ราคา ${round2(price)} คะแนนรวม ${score.toFixed(1)} (${verdict}) ยังไม่เข้าเงื่อนไขขาย`,
+                market_analysis: marketSnapshot,
+                openSwingLots: swingLots.length,
+                nearestTarget: round2(nearest.target),
+                distanceToTargetPct: round2(distPct),
+              },
+              ts: Timestamp.now(),
+            });
+            holdCount++;
+          }
+        }
+      } catch (err) {
+        console.error(`[auto:${market}] hold log failed for ${uid}:`, err.message);
+      }
     }
   }
-  console.log(`[auto:${market}] done, ${sellCount} sells, ${buyCount} buys executed`);
+  console.log(`[auto:${market}] done, ${sellCount} sells, ${buyCount} buys, ${holdCount} holds logged`);
 }
+
 
 async function main() {
   const app = initializeApp({ credential: cert(getServiceAccount()) });
