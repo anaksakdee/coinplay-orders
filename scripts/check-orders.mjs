@@ -3,7 +3,7 @@
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { computeReturns, computeSignal } from "../shared/signals.mjs";
-import { scoreMarket, describeScore, positionFraction, THRESHOLDS } from "../shared/strategy.mjs";
+import { scoreMarket, describeScore, positionFraction, THRESHOLDS, computeATR } from "../shared/strategy.mjs";
 import { evaluateIndicators, describeLearning } from "../shared/backtest.mjs";
 
 const FEE_RATES = { binance: 0.001, bitkub: 0.0025 };
@@ -23,7 +23,69 @@ const BTC_ACCUM_TARGET = 0.0025;
 function btcAccumCeiling(sellPrice, feeRate, gain) {
   return (sellPrice * (1 - feeRate)) / ((1 + feeRate) * (1 + gain));
 }
-const KLINE_LIMIT = 300; // ดึงย้อนหลังเยอะขึ้นเพื่อให้มีข้อมูลพอสำหรับประเมินอินดิเคเตอร์ย้อนหลัง (backtest)
+const KLINE_LIMIT = 900; // ดึงย้อนหลังเยอะพอทั้งสำหรับ backtest อินดิเคเตอร์ และรวมเป็นแท่ง 15 นาทีเพื่อหาไม้ยาว
+// ---------- กลยุทธ์ "เล่นเฉพาะไม้ยาว" (spike fade) ----------
+// ไม้เขียวยาว -> ขายบางส่วนรับรอบ แล้วตั้งซื้อคืนตอนราคาย่อกลับ
+// ไม้แดงยาว  -> ซื้อบางส่วนตอนดิ่ง แล้วตั้งขายตอนราคาเด้งกลับ
+// ไม้สั้น/ปกติ -> ไม่ทำอะไร (ไม่ไล่ซื้อระหว่างทาง)
+const SPIKE_ATR_MULTIPLE = 1.5;  // ต้องยาวกว่าความผันผวนปกติของช่วงนั้น
+const SPIKE_TRADE_PCT = 0.20;    // เทรดครั้งละ 20% ตามที่กำหนด
+const SPIKE_MIN_BODY_PCT = 2.5;  // ไม้ต้องยาวอย่างน้อยเท่านี้ (% ของราคา) ถึงจะนับเป็น "ไม้ยาว" ที่คุ้มเข้าเทรด
+const SPIKE_FEE_SAFETY = 2.5;    // ส่วนต่างที่จะได้ ต้องมากกว่าค่าธรรมเนียมไป-กลับอย่างน้อยเท่านี้
+
+function spikeMinBodyPct() { return SPIKE_MIN_BODY_PCT; }
+
+// ระยะย่อที่จะตั้งไม้สวน (สัดส่วนของลำตัวไม้) — ปรับตามค่าธรรมเนียมของแต่ละตลาด
+// เหตุผล: กำไรที่ได้ ~ retrace x body ต้องชนะค่าธรรมเนียมไป-กลับ (~2 x feeRate)
+//   ตัวอย่างจริง: ไม้ 1% ย่อ 20% บน Binance ได้ 0.000% พอดี = เหนื่อยฟรี
+// ถ้าตรึง retrace ไว้ที่ 20% เท่ากันทั้งสองตลาด Bitkub (ค่าธรรมเนียมแพงกว่า 2.5 เท่า)
+// จะต้องรอไม้ยาวถึง 6.25% ซึ่งแทบไม่เกิดขึ้นจริง = กลยุทธ์ไม่ทำงานเลย
+// จึงให้ตลาดที่ค่าธรรมเนียมแพงกว่า "รอย่อลึกกว่า" แทน เกณฑ์ความยาวไม้จะได้เท่ากันที่ 2.5%
+//   Binance (0.10%) -> ย่อ 20% ตามที่กำหนดไว้เดิมพอดี
+//   Bitkub  (0.25%) -> ย่อ 50%
+function spikeRetrace(feeRate) {
+  return Math.min(0.6, (SPIKE_FEE_SAFETY * (2 * feeRate * 100)) / SPIKE_MIN_BODY_PCT);
+}
+
+// รวมแท่งเล็กเป็นแท่งใหญ่ (เช่น 1 นาที x15 = 15 นาที)
+// จำเป็นเพราะข้อมูลที่ดึงมาเป็นแท่ง 1 นาที ซึ่งแทบไม่มีทางยาวถึงขั้นต่ำที่คุ้มค่าธรรมเนียม
+// "ไม้ยาว" ที่ตาเห็นบนกราฟจริงคือแท่งของไทม์เฟรมที่ใหญ่กว่า จึงต้องรวมก่อนแล้วค่อยตรวจ
+const SPIKE_TIMEFRAME_MINUTES = 15;
+function aggregateCandles(candles, factor) {
+  const out = [];
+  for (let i = candles.length % factor; i + factor <= candles.length; i += factor) {
+    const chunk = candles.slice(i, i + factor);
+    out.push({
+      t: chunk[0].t,
+      o: chunk[0].o,
+      h: Math.max(...chunk.map((c) => c.h)),
+      l: Math.min(...chunk.map((c) => c.l)),
+      c: chunk[chunk.length - 1].c,
+      v: chunk.reduce((a, c) => a + (c.v || 0), 0),
+    });
+  }
+  return out;
+}
+
+// ตรวจว่าแท่งล่าสุดเป็น "ไม้ยาว" ไหม — ต้องผ่านทั้ง 2 เงื่อนไข (ยาวกว่าปกติ + ยาวพอคุ้มค่าธรรมเนียม)
+function detectSpike(candles, feeRate) {
+  if (!candles || candles.length < 20) return null;
+  const c = candles[candles.length - 1];
+  if (!c || !c.o || !c.c) return null;
+  const atr = computeATR(candles, 14);
+  if (!atr) return null;
+  const body = c.c - c.o;
+  const bodyPct = Math.abs(body) / c.c * 100;
+  const minBody = spikeMinBodyPct();
+  const longEnough = Math.abs(body) > SPIKE_ATR_MULTIPLE * atr;
+  return {
+    isSpike: longEnough && bodyPct >= minBody,
+    direction: body > 0 ? "up" : "down",
+    body, bodyPct, minBody, atr, longEnough,
+    open: c.o, close: c.c,
+  };
+}
+
 const CORE_BUY_INTERVAL_MS = 12 * 60 * 60 * 1000; // ขาสะสมระยะยาว: ทยอยซื้อทุก 12 ชั่วโมง
 const CORE_BUY_FRACTION = 0.10; // ใช้เงินสด 10% ต่อการสะสมระยะยาว 1 ครั้ง
 
@@ -381,7 +443,14 @@ async function processAutoTrade(db, market, price, candles) {
   const score = analysis.composite;
   const verdict = describeScore(score);
 
+  // กลยุทธ์เล่นเฉพาะไม้ยาว: ตรวจแท่งล่าสุดว่าเป็นไม้ยาวพอจะเข้าเทรดไหม
+  const spikeCandles = aggregateCandles(candles, SPIKE_TIMEFRAME_MINUTES);
+  const spike = detectSpike(spikeCandles, feeRate);
+
   console.log(`[auto:${market}] price=${price} score=${score.toFixed(1)} (${verdict}) atr%=${analysis.atrPct ? analysis.atrPct.toFixed(3) : "n/a"}`);
+  if (spike) {
+    console.log(`[auto:${market}] ไม้ล่าสุด ${spike.direction === "up" ? "เขียว" : "แดง"} ยาว ${spike.bodyPct.toFixed(3)}% (ต้องยาว >= ${spike.minBody.toFixed(2)}% และ > ${SPIKE_ATR_MULTIPLE}xATR) -> ${spike.isSpike ? "เข้าเงื่อนไขไม้ยาว" : "ไม้สั้นเกินไป ไม่เทรด"}`);
+  }
   if (learned) console.log(`[auto:${market}] ${describeLearning(learned)}`);
 
   const usersSnap = await db.collection("users").get();
@@ -503,6 +572,68 @@ async function processAutoTrade(db, market, price, candles) {
       }
     }
 
+    // ---------- 1b) ไม้เขียวยาว: ขายรับรอบ 20% แล้วตั้งคำสั่งซื้อคืนตอนราคาย่อ ----------
+    // ใช้ระบบ "คำสั่งรอราคา" (orders) ที่มีอยู่แล้ว ซึ่ง processMarket จะคอยเช็คให้ทุกรอบ
+    if (spike && spike.isSpike && spike.direction === "up") {
+      try {
+        await db.runTransaction(async (tx) => {
+          const snap = await tx.get(userRef);
+          const fresh = snap.data();
+          const fl = fresh[ledgerKey];
+          const fa = fl && fl.autoTrade;
+          if (!fa || !fa.enabled) return;
+          if (!(fl.btc > 0)) return;
+          // ถ้ามีคำสั่งซื้อคืนจากไม้ยาวรอบก่อนค้างอยู่ ไม่ต้องซ้อนอีก
+          if ((fl.orders || []).some((o) => o.spike)) return;
+
+          const qty = fl.btc * SPIKE_TRADE_PCT;
+          const amount = qty * price;
+          const minTicket = market === "bitkub" ? 20 : 1;
+          if (amount < minTicket) return;
+
+          const result = applyTrade(fl, "sell", amount, price, feeRate);
+          if (!result) return;
+
+          // ตั้งซื้อคืนที่ราคาย่อลงมา 20% ของลำตัวไม้ ใช้เงินที่เพิ่งขายได้ทั้งก้อน
+          const retrace = spikeRetrace(feeRate);
+          const target = round2(price - retrace * Math.abs(spike.body));
+          const expectedGainPct = ((price * (1 - feeRate)) / (target * (1 + feeRate)) - 1) * 100;
+          const order = {
+            id: "spk" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            side: "buy", targetPrice: target, amount: round2(result.amount * (1 - feeRate)),
+            createdAt: now, spike: true,
+          };
+          const equity = result.ledger.cash + result.ledger.btc * price;
+
+          tx.update(userRef, {
+            [`${ledgerKey}.cash`]: result.ledger.cash,
+            [`${ledgerKey}.btc`]: result.ledger.btc,
+            [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
+            [`${ledgerKey}.lots`]: result.ledger.lots,
+            [`${ledgerKey}.orders`]: (fl.orders || []).concat([order]),
+          });
+
+          const reasonText = `ไม้เขียวยาว: แท่งล่าสุดพุ่งขึ้น ${spike.bodyPct.toFixed(2)}% (ยาวกว่าปกติ ${(Math.abs(spike.body) / spike.atr).toFixed(1)} เท่าของ ATR และผ่านขั้นต่ำ ${spike.minBody.toFixed(2)}% ที่คุ้มค่าธรรมเนียม) จึงขายรับรอบ ${(SPIKE_TRADE_PCT * 100).toFixed(0)}% ของเหรียญที่ถือ = ${result.qty.toFixed(8)} BTC ที่ราคา ${round2(price)} แล้วตั้งซื้อคืนอัตโนมัติไว้ที่ ${target} (ย่อลง ${(retrace * 100).toFixed(0)}% ของลำตัวไม้) ถ้าราคาย่อถึงจะได้เหรียญกลับมามากกว่าเดิมประมาณ ${expectedGainPct.toFixed(2)}%`;
+
+          const tradeRef = db.collection("trades").doc();
+          tx.set(tradeRef, {
+            uid, email: fresh.email || null, market, ccy: ledgerKey, side: "sell",
+            price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
+            autoTrade: true, sleeve: "swing", trigger: "spike_up_fade", reason: reasonText, ts: Timestamp.now(),
+          });
+          await writeDecision(tx, uid, fresh.email, "sell", reasonText, {
+            trigger: "spike_up_fade", sleeve: "swing",
+            bodyPct: round2(spike.bodyPct), minBodyPct: round2(spike.minBody),
+            btcSold: result.qty, rebuyTarget: target,
+            expectedBtcGainPct: round2(expectedGainPct),
+          });
+          sellCount++;
+        });
+      } catch (err) {
+        console.error(`[auto:${market}] spike sell failed for ${uid}:`, err.message);
+      }
+    }
+
     // ---------- 2) พิจารณาซื้อ (ทั้งขา swing และขา core) ----------
     try {
       await db.runTransaction(async (tx) => {
@@ -608,8 +739,16 @@ async function processAutoTrade(db, market, price, candles) {
           }
         }
 
-        // ขา swing: ซื้อเมื่อคะแนนถึงเกณฑ์ — ไม่มีคูลดาวน์ กันพลาดจังหวะที่สัญญาณมาแล้วหายเร็ว
-        // (ไม่ใช่ปัญหาซื้อรัวไม่รู้จบ เพราะแต่ละครั้งใช้สัดส่วนของเงินสด "ที่เหลือ" ยิ่งซื้อถี่ ก้อนเงินยิ่งเล็กลงเอง)
+        // ขา swing: เข้าเทรด "เฉพาะไม้ยาว" เท่านั้น ไม่ไล่ซื้อไม้สั้นระหว่างทาง
+        // ไม้แดงยาว = จังหวะเข้าซื้อ (ราคาดิ่งแรงเกินจริง มีโอกาสเด้ง) แล้วตั้งขายตอนเด้งกลับ
+        // ไม้เขียวยาวจะไปเข้าเงื่อนไข "ขายรับรอบ" ด้านบนแทน ไม่ใช่จุดซื้อ
+        if (!spike || !spike.isSpike) {
+          blockers.push(spike && spike.longEnough
+            ? `แท่งล่าสุดยาว ${spike.bodyPct.toFixed(2)}% ยังไม่ถึงขั้นต่ำ ${spike.minBody.toFixed(2)}% ที่จะคุ้มค่าธรรมเนียม`
+            : `แท่งล่าสุดเป็นไม้สั้น/ปกติ ไม่ใช่จังหวะเข้าตามกลยุทธ์ (เล่นเฉพาะไม้ยาว)`);
+        } else if (spike.direction === "up") {
+          blockers.push(`ไม้ล่าสุดเป็นไม้เขียวยาว (ราคาพุ่งขึ้น) ไม่ใช่จังหวะซื้อ — เป็นจังหวะขายรับรอบแทน`);
+        }
         if (score < THRESHOLDS.weakBuy) blockers.push(`คะแนนรวม ${score.toFixed(1)} ยังต่ำกว่าเกณฑ์ซื้อ ${THRESHOLDS.weakBuy}`);
 
         // ไม่จำกัดว่าห้ามซื้อที่ราคาใกล้ไม้เดิม — ซื้อกองที่ราคาเดียวกันไม่ผิด ถ้าสัญญาณบอกว่าควรซื้อ
