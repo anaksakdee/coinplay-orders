@@ -583,16 +583,16 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
 
           let lot = null, why = null, reasonText = null;
           for (const l of swingLots) {
-            const targetSell = l.price * (1 + PROFIT_TARGET) / (1 - feeRate);
             const stopLoss = l.price * (1 - STOP_LOSS_PCT);
             const pnlPct = (price / l.price - 1) * 100;
             const netPnlPct = (price * (1 - feeRate) / (l.price * (1 + feeRate)) - 1) * 100;
 
-            if (price >= targetSell) {
-              lot = l; why = "profit_target";
-              reasonText = `ขายทำกำไรตามเป้า: ไม้นี้ซื้อไว้ที่ ${round2(l.price)} ตอนนี้ราคา ${round2(price)} (+${pnlPct.toFixed(2)}%) ผ่านเป้าหมาย ${(PROFIT_TARGET * 100).toFixed(1)}% หลังหักค่าธรรมเนียมแล้ว จึงขายล็อกกำไรไว้ก่อน แล้วรอซื้อคืนตอนราคาย่อเพื่อให้ได้เหรียญกลับมามากกว่าเดิม`;
-              break;
-            }
+            // ปิดการ "ขายทำกำไร 2%" ทิ้ง — ทดสอบทั้งระบบรวมกัน 5 ปีแล้วพบว่านี่คือตัวที่ทำให้พัง
+            //   เปิดไว้:  เหรียญ -49.01% เทียบถือยาว | ปิดทิ้ง: +10.21%
+            // สาเหตุ: มันขายไม้ swing รัวๆ (76 ครั้งใน 5 ปี) จนขา swing เหลือเหรียญศูนย์
+            // และไปแย่งของที่กลยุทธ์ไม้ยาวต้องใช้ (สปайค์ได้ขายแค่ 11 ครั้ง แทนที่จะเป็น 75)
+            // อีกทั้ง lastSell มีช่องเดียว การขายหลายไม้ติดกันทำให้เงินก้อนก่อนถูกลืม ไม่มีใครซื้อคืน
+            // การขายรับรอบทำโดยกลไก "ไม้เขียวยาว" อยู่แล้ว ซึ่งมีคิวคำสั่งซื้อคืนของตัวเอง (สูงสุด 3 รอบ)
             if (netPnlPct > 0.3 && score <= THRESHOLDS.strongSell) {
               lot = l; why = "lock_profit_bearish";
               reasonText = `ขายล็อกกำไรก่อนขาลง: ไม้นี้ซื้อที่ ${round2(l.price)} ตอนนี้กำไรสุทธิ +${netPnlPct.toFixed(2)}% แม้ยังไม่ถึงเป้า ${(PROFIT_TARGET * 100).toFixed(1)}% แต่คะแนนรวมตกลงมาที่ ${score.toFixed(1)} (${verdict}) จึงรีบเก็บกำไรไว้ก่อนที่ราคาจะย้อนกลับลงไปกินกำไรที่มีอยู่`;
@@ -868,7 +868,7 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
           [`${ledgerKey}.autoTrade`]: newAuto,
         });
         const topReasons = analysis.parts.slice().sort((a, b) => b.score * b.weight - a.score * a.weight).slice(0, 3);
-        const swingReason = `เปิดไม้เทรดสั้น (swing): คะแนนรวม ${score.toFixed(1)} = ${verdict} ผ่านเกณฑ์ซื้อ ${THRESHOLDS.weakBuy} จึงลงเงิน ${round2(result.amount)} (${(frac * 100).toFixed(0)}% ของเงินสด ปรับขนาดตามความมั่นใจและความผันผวน ATR ${analysis.atrPct ? analysis.atrPct.toFixed(2) + "%" : "n/a"}) ได้ ${result.qty.toFixed(8)} BTC — เหตุผลหลักที่เข้าซื้อ: ${topReasons.map((r) => r.text).join(" | ")} — จะขายทำกำไรเมื่อราคาขึ้นถึง ${round2(price * (1 + PROFIT_TARGET) / (1 - feeRate))}`;
+        const swingReason = `เปิดไม้เทรดสั้น (swing): คะแนนรวม ${score.toFixed(1)} = ${verdict} ผ่านเกณฑ์ซื้อ ${THRESHOLDS.weakBuy} จึงลงเงิน ${round2(result.amount)} (${(frac * 100).toFixed(0)}% ของเงินสด ปรับขนาดตามความมั่นใจและความผันผวน ATR ${analysis.atrPct ? analysis.atrPct.toFixed(2) + "%" : "n/a"}) ได้ ${result.qty.toFixed(8)} BTC — เหตุผลหลักที่เข้าซื้อ: ${topReasons.map((r) => r.text).join(" | ")} — ไม้นี้จะถูกขายรับรอบเมื่อเจอไม้เขียวยาว (ไม่ได้ตั้งขายที่ราคาตายตัว)`;
         const tradeRef = db.collection("trades").doc();
         tx.set(tradeRef, {
           uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
@@ -896,19 +896,13 @@ async function processAutoTrade(db, market, price, candles, spikeCandles) {
         if (fl && fl.lots && fl.lots.length && !(fl.lastSell && fl.lastSell.qty > 0)) {
           const swingLots = fl.lots.filter((l) => l.sleeve !== "core");
           if (swingLots.length) {
-            const nearest = swingLots.reduce((best, l) => {
-              const t = l.price * (1 + PROFIT_TARGET) / (1 - feeRate);
-              return !best || t < best.target ? { lot: l, target: t } : best;
-            }, null);
-            const distPct = (nearest.target / price - 1) * 100;
-            await db.collection("logs").add({
+                        await db.collection("logs").add({
               uid, email: data.email || null, type: "auto_decision",
               detail: {
                 market, action: "hold", source: "background", trigger: "holding_position",
-                reason: `ถือไม้รอราคาขึ้น: มีไม้เทรดสั้นค้างอยู่ ${swingLots.length} ไม้ ไม้ที่ใกล้ถึงเป้าที่สุดซื้อไว้ที่ ${round2(nearest.lot.price)} ต้องรอราคาขึ้นไปถึง ${round2(nearest.target)} (อีก ${distPct.toFixed(2)}%) ถึงจะขายทำกำไร ตอนนี้ราคา ${round2(price)} คะแนนรวม ${score.toFixed(1)} (${verdict}) ยังไม่เข้าเงื่อนไขขาย`,
+                reason: `ถือไม้รอจังหวะ: มีไม้เทรดสั้นค้างอยู่ ${swingLots.length} ไม้ ระบบจะขายรับรอบก็ต่อเมื่อเจอไม้เขียวยาว (>=2.5% บนกราฟ 1 ชม.) หรือเข้าเงื่อนไขตัดขาดทุน ตอนนี้ราคา ${round2(price)} คะแนนรวม ${score.toFixed(1)} (${verdict}) ยังไม่เข้าเงื่อนไขขาย`,
                 market_analysis: marketSnapshot,
                 openSwingLots: swingLots.length,
-                nearestTarget: round2(nearest.target),
                 distanceToTargetPct: round2(distPct),
               },
               ts: Timestamp.now(),
