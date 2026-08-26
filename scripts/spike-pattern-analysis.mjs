@@ -171,6 +171,36 @@ function recurrenceAnalysis(spikes) {
   console.log(`  ทั้งหมด: เฉลี่ยห่างกัน ${all.mean.toFixed(1)} ชม. | sd ${all.sd.toFixed(1)} | CV=${all.cv.toFixed(2)} (CV~1 = สุ่มแบบ Poisson, CV<0.5 = ค่อนข้างสม่ำเสมอ, CV>1.5 = กระจุกเป็นช่วงๆ)`);
   console.log(`  ไม้เขียว: เฉลี่ยห่างกัน ${up.mean.toFixed(1)} ชม. | sd ${up.sd.toFixed(1)} | CV=${up.cv.toFixed(2)}`);
   console.log(`  ไม้แดง:   เฉลี่ยห่างกัน ${down.mean.toFixed(1)} ชม. | sd ${down.sd.toFixed(1)} | CV=${down.cv.toFixed(2)}`);
+  recurrenceAtPeriods(allGaps);
+}
+
+// เช็คว่ามี "รอบเวลาเกิดซ้ำ" ใกล้ 3 วัน/1 สัปดาห์/1 เดือน/3 เดือน/6 เดือน หรือไม่ — ต่างจาก CV ด้านบน
+// (ซึ่งดูภาพรวมว่ากระจุกตัวหรือสม่ำเสมอ) อันนี้เช็คเจาะจงว่าช่วงห่างระหว่างไม้ยาว "กองตัวหนาแน่นกว่าปกติ"
+// ใกล้ความยาวรอบเหล่านี้ไหม เทียบกับ baseline ที่สมมติว่าช่วงห่างกระจายแบบ exponential (memoryless)
+// ตามค่าเฉลี่ยจริง — ถ้าจำนวนจริงสูงกว่า baseless มาก แปลว่ามีรอบเวลาที่แท่งยาวมักเกิดซ้ำจริง
+function recurrenceAtPeriods(gaps) {
+  console.log("\n  เช็ครอบเวลาเกิดซ้ำเฉพาะจุด (เทียบ baseline สุ่มแบบ exponential ที่ค่าเฉลี่ยเดียวกัน):");
+  console.log("  คำเตือน: การกระจายจริงกระจุกตัวกว่า exponential มาก (CV>1.5 ด้านบน) ดังนั้น baseline นี้เป็นแค่ตัวเทียบหยาบๆ");
+  console.log("  ไม่ใช่หลักฐานเด็ดขาดว่ามี \"รอบปฏิทิน\" จริง — และช่วง 3/6 เดือนมีจำนวนตัวอย่างน้อยมาก ตัวเลขอัตราส่วนอาจเพี้ยนได้ง่าย");
+  const meanGap = gaps.reduce((a, b) => a + b, 0) / gaps.length; // ชม.
+  const PERIODS = [
+    { label: "3 วัน", hours: 3 * 24 },
+    { label: "1 สัปดาห์", hours: 7 * 24 },
+    { label: "1 เดือน", hours: 30 * 24 },
+    { label: "3 เดือน", hours: 90 * 24 },
+    { label: "6 เดือน", hours: 182 * 24 },
+  ];
+  for (const p of PERIODS) {
+    const lo = p.hours * 0.8, hi = p.hours * 1.2; // หน้าต่าง ±20% รอบความยาวคาบ
+    const actual = gaps.filter((g) => g >= lo && g <= hi).length;
+    // P(gap อยู่ใน [lo,hi]) ภายใต้ exponential(mean) = e^(-lo/mean) - e^(-hi/mean)
+    const pExpected = Math.exp(-lo / meanGap) - Math.exp(-hi / meanGap);
+    const expected = pExpected * gaps.length;
+    const ratio = expected > 0 ? actual / expected : null;
+    const reliable = expected >= 3; // ตัวอย่างคาดหวังน้อยกว่านี้ อัตราส่วนไม่น่าเชื่อถือ
+    const flag = !reliable ? " <-- ตัวอย่างน้อยเกินไป (คาดหวัง <3 ครั้ง) ตัวเลขนี้ไม่น่าเชื่อถือ อย่าตีความ" : (ratio != null && ratio >= 1.5 ? " <-- สูงกว่า baseline ชัดเจน มีสัญญาณรอบเกิดซ้ำจริง" : "");
+    console.log(`    ${p.label} (${p.hours}ชม. ±20%): เจอจริง ${actual} ครั้ง | คาดว่าเจอ (สุ่ม) ${expected.toFixed(1)} ครั้ง | อัตราส่วน ${ratio != null ? ratio.toFixed(2) + "x" : "n/a"}${flag}`);
+  }
 }
 
 // ---------- 4) ปริมาณซื้อขาย (volume) ตอนเกิดไม้ยาว ----------
