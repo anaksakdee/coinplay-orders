@@ -580,89 +580,17 @@ async function processAutoTrade(db, messaging, market, price, candles) {
     const userRef = db.collection("users").doc(uid);
     let didSomething = false;
 
-    // ---------- 1) ขา swing: พิจารณาขายทำกำไร ----------
-    // ขายเมื่อ (ก) ถึงเป้ากำไรที่ตั้งไว้ หรือ (ข) มีกำไรแล้วและสัญญาณเอนขาลงชัด (ล็อกกำไรก่อนโดนกลืน)
-    // หรือ (ค) ขาดทุนหนักและขาลงชัดเจนจริงๆ (ตัดขาดทุน)
-    let keepChecking = true, guard = 0;
-    while (keepChecking && guard < 30) {
-      keepChecking = false; guard++;
-      let notifyInfo = null;
-      try {
-        await db.runTransaction(async (tx) => {
-          const snap = await tx.get(userRef);
-          const fresh = snap.data();
-          const fl = fresh[ledgerKey];
-          const fa = fl && fl.autoTrade;
-          if (!fa || !fa.enabled || !fl.lots || !fl.lots.length) return;
-
-          // ขา core ไม่ขายอัตโนมัติ — คัดเฉพาะไม้ swing
-          const swingLots = fl.lots.filter((l) => l.sleeve !== "core");
-          if (!swingLots.length) return;
-
-          let lot = null, why = null, reasonText = null;
-          for (const l of swingLots) {
-            const stopLoss = l.price * (1 - STOP_LOSS_PCT);
-            const pnlPct = (price / l.price - 1) * 100;
-            const netPnlPct = (price * (1 - feeRate) / (l.price * (1 + feeRate)) - 1) * 100;
-
-            // ปิดการ "ขายทำกำไร 2%" ทิ้ง — ทดสอบทั้งระบบรวมกัน 5 ปีแล้วพบว่านี่คือตัวที่ทำให้พัง
-            //   เปิดไว้:  เหรียญ -49.01% เทียบถือยาว | ปิดทิ้ง: +10.21%
-            // สาเหตุ: มันขายไม้ swing รัวๆ (76 ครั้งใน 5 ปี) จนขา swing เหลือเหรียญศูนย์
-            // และไปแย่งของที่กลยุทธ์ไม้ยาวต้องใช้ (สปайค์ได้ขายแค่ 11 ครั้ง แทนที่จะเป็น 75)
-            // อีกทั้ง lastSell มีช่องเดียว การขายหลายไม้ติดกันทำให้เงินก้อนก่อนถูกลืม ไม่มีใครซื้อคืน
-            // การขายรับรอบทำโดยกลไก "ไม้เขียวยาว" อยู่แล้ว ซึ่งมีคิวคำสั่งซื้อคืนของตัวเอง (สูงสุด 3 รอบ)
-            if (netPnlPct > 0.3 && score <= THRESHOLDS.strongSell) {
-              lot = l; why = "lock_profit_bearish";
-              reasonText = `ขายล็อกกำไรก่อนขาลง: ไม้นี้ซื้อที่ ${round2(l.price)} ตอนนี้กำไรสุทธิ +${netPnlPct.toFixed(2)}% แม้ยังไม่ถึงเป้า ${(PROFIT_TARGET * 100).toFixed(1)}% แต่คะแนนรวมตกลงมาที่ ${score.toFixed(1)} (${verdict}) จึงรีบเก็บกำไรไว้ก่อนที่ราคาจะย้อนกลับลงไปกินกำไรที่มีอยู่`;
-              break;
-            }
-            if (price <= stopLoss && score <= THRESHOLDS.strongSell) {
-              lot = l; why = "stop_loss";
-              reasonText = `ตัดขาดทุน: ไม้นี้ซื้อที่ ${round2(l.price)} ตอนนี้ราคา ${round2(price)} (${pnlPct.toFixed(2)}%) ขาดทุนเกินเกณฑ์ ${(STOP_LOSS_PCT * 100).toFixed(0)}% และคะแนนรวม ${score.toFixed(1)} ยืนยันว่าเป็นขาลงชัดเจน จึงตัดขาดทุนเพื่อเอาเงินสดไปรอซื้อคืนที่ราคาต่ำกว่า (ได้เหรียญกลับมามากกว่าถือค้างไว้)`;
-              break;
-            }
-          }
-          if (!lot) return;
-
-          const result = sellSpecificLot(fl, lot, price, feeRate);
-          if (!result) return;
-          const equity = result.ledger.cash + result.ledger.btc * price;
-          const lastSell = { price, usd: result.amount, qty: result.qty, ts: now };
-
-          tx.update(userRef, {
-            [`${ledgerKey}.cash`]: result.ledger.cash,
-            [`${ledgerKey}.btc`]: result.ledger.btc,
-            [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-            [`${ledgerKey}.lots`]: result.ledger.lots,
-            [`${ledgerKey}.lastSell`]: lastSell,
-          });
-
-          const tradeRef = db.collection("trades").doc();
-          tx.set(tradeRef, {
-            uid, email: fresh.email || null, market, ccy: ledgerKey, side: "sell",
-            price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-            autoTrade: true, sleeve: "swing", trigger: why, reason: reasonText, ts: Timestamp.now(),
-          });
-
-          await writeDecision(tx, uid, fresh.email, "sell", reasonText, {
-            trigger: why,
-            lotBoughtAt: round2(lot.price),
-            btcSold: result.qty,
-            proceeds: round2(result.amount),
-            pnlPct: round2((price / lot.price - 1) * 100),
-            nextStep: `ตั้งเพดานซื้อคืนไว้ที่ ${round2(btcAccumCeiling(price, feeRate, BTC_ACCUM_TARGET))} — จะซื้อคืนก็ต่อเมื่อราคาลงต่ำกว่านี้ เพื่อให้ได้เหรียญเพิ่มอย่างน้อย ${(BTC_ACCUM_TARGET * 100).toFixed(1)}%`,
-          });
-
-          sellCount++; didSomething = true;
-          keepChecking = true;
-          notifyInfo = { side: "sell", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: why === "stop_loss" ? "ตัดขาดทุน" : "ล็อกกำไรก่อนขาลง" };
-        });
-        if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
-      } catch (err) {
-        console.error(`[auto:${market}] sell failed for ${uid}:`, err.message);
-        keepChecking = false;
-      }
-    }
+    // ---------- 1) ขา swing: ขายทำกำไร/ตัดขาดทุนแบบเก่า — ปิดถาวรแล้ว ----------
+    // เคยมี 3 กลไก: (2% profit target), lock_profit_bearish, stop_loss — backtest ย้อนหลัง 5 ปีแบบ
+    // ทั้งระบบรวมกันพบว่าทั้ง 3 ตัวทำลายพอร์ตด้วยรูปแบบเดียวกันเป๊ะ: ขายไม้ swing ถี่เกิน (60-76 ครั้ง/5ปี)
+    // จนขา swing เหลือเหรียญศูนย์ ไปแย่งบทบาทกลยุทธ์ "ไม้ยาว" (ไม้เขียวยาวขายรับรอบ/ไม้แดงยาวเข้าซื้อ)
+    // ที่มีคิวซื้อคืนของตัวเองอยู่แล้ว (สูงสุด 3 รอบ):
+    //   2% profit target เปิดไว้:      -49.01% เทียบถือยาว
+    //   lock_profit_bearish เปิดไว้:   -49.01% เทียบถือยาว (รูปแบบเดียวกันเป๊ะ ไม่เคยผ่าน backtest มาก่อน)
+    //   stop_loss เปิดไว้:             -43.33% เฉลี่ย 8 รอบ (sd 1.6% เสถียร ไม่ใช่บังเอิญจาก Monte Carlo)
+    //   ปิดทั้ง 3 ตัว เหลือแค่ไม้ยาว+core: +14.57% เฉลี่ย 8 รอบ (sd 1.8%) — ตรงกับที่เคยยืนยันไว้ก่อนหน้า
+    // ผลคือบัญชีไม่มีเพดานตัดขาดทุนอีกต่อไป (แลกมาเพื่อให้กลยุทธ์ไม้ยาวทำงานได้เต็มที่ตามข้อมูลจริง)
+    // ดู scripts/forecast-target-test.mjs สำหรับสคริปต์ backtest ที่ใช้ยืนยันตัวเลขข้างต้น
 
     // ---------- 1b) ไม้เขียวยาว: ขายรับรอบ 20% แล้วตั้งคำสั่งซื้อคืนตอนราคาย่อ ----------
     // ใช้ระบบ "คำสั่งรอราคา" (orders) ที่มีอยู่แล้ว ซึ่ง processMarket จะคอยเช็คให้ทุกรอบ
@@ -739,6 +667,77 @@ async function processAutoTrade(db, messaging, market, price, candles) {
         if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
       } catch (err) {
         console.error(`[auto:${market}] spike sell failed for ${uid}:`, err.message);
+      }
+    }
+
+    // ---------- 1c) forecast target: ไม้ swing ถึงราคาเป้าหมายจาก Monte Carlo แล้วขายทั้งไม้ ----------
+    // เพิ่มจากกลยุทธ์ไม้ยาวเดิม (ไม่แทนที่) — เป้าหมาย = p90 ของ Monte Carlo forecast (20 แท่งข้างหน้า)
+    // ตั้งครั้งแรกตอนเจอไม้ แล้ว "รี้ดขึ้นอย่างเดียว" ทุกรอบตาม forecast ล่าสุด ไม่มีวันลดลง (เก็บไว้ที่ l.fcTarget)
+    // ขายก็ต่อเมื่อราคาปัจจุบันถึงเป้าและมีกำไรสุทธิจริง (กันขายขาดทุนตอน forecast มองลบ)
+    // backtest 5 ปี x 8 รอบเฉลี่ย: ช่วยให้ได้เหรียญจากการหมุนรอบเพิ่มขึ้นเมื่อรวมกับกลยุทธ์ไม้ยาวที่ผ่านแล้ว
+    {
+      const forecast = analysis.signal && analysis.signal.forecast;
+      let keepChecking2 = !!(forecast && forecast.p90 > 0), guard2 = 0;
+      while (keepChecking2 && guard2 < 30) {
+        keepChecking2 = false; guard2++;
+        let notifyInfo = null;
+        try {
+          await db.runTransaction(async (tx) => {
+            const snap = await tx.get(userRef);
+            const fresh = snap.data();
+            const fl = fresh[ledgerKey];
+            const fa = fl && fl.autoTrade;
+            if (!fa || !fa.enabled || !fl.lots || !fl.lots.length) return;
+
+            const lots = fl.lots.map((l) => ({ ...l }));
+            let lot = null;
+            for (const l of lots) {
+              if (l.sleeve === "core") continue;
+              l.fcTarget = Math.max(l.fcTarget || 0, forecast.p90);
+              const netPnlPct = (price * (1 - feeRate) / (l.price * (1 + feeRate)) - 1) * 100;
+              if (price >= l.fcTarget && netPnlPct > 0) { lot = l; break; }
+            }
+            // เขียนเป้าหมายที่รี้ดขึ้นกลับไปเสมอ แม้ยังไม่ถึงเป้า จะได้รี้ดต่อจากค่านี้ในรอบหน้า
+            tx.update(userRef, { [`${ledgerKey}.lots`]: lots });
+            if (!lot) return;
+
+            const result = sellSpecificLot(fl, lot, price, feeRate);
+            if (!result) return;
+            const equity = result.ledger.cash + result.ledger.btc * price;
+            const lastSell = { price, usd: result.amount, qty: result.qty, ts: now };
+            const reasonText = `ถึงราคาเป้าหมายจาก Monte Carlo: ไม้นี้ซื้อที่ ${round2(lot.price)} ตอนนี้ราคา ${round2(price)} ถึงเป้าหมายที่คาดการณ์ไว้ ${round2(lot.fcTarget)} แล้ว (กำไรสุทธิ +${((price * (1 - feeRate) / (lot.price * (1 + feeRate)) - 1) * 100).toFixed(2)}%) จึงขายทำกำไรทั้งไม้`;
+
+            tx.update(userRef, {
+              [`${ledgerKey}.cash`]: result.ledger.cash,
+              [`${ledgerKey}.btc`]: result.ledger.btc,
+              [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
+              [`${ledgerKey}.lots`]: result.ledger.lots,
+              [`${ledgerKey}.lastSell`]: lastSell,
+            });
+
+            const tradeRef = db.collection("trades").doc();
+            tx.set(tradeRef, {
+              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "sell",
+              price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
+              autoTrade: true, sleeve: "swing", trigger: "forecast_target", reason: reasonText, ts: Timestamp.now(),
+            });
+            await writeDecision(tx, uid, fresh.email, "sell", reasonText, {
+              trigger: "forecast_target",
+              lotBoughtAt: round2(lot.price),
+              forecastTarget: round2(lot.fcTarget),
+              btcSold: result.qty,
+              proceeds: round2(result.amount),
+            });
+
+            sellCount++; didSomething = true;
+            keepChecking2 = true;
+            notifyInfo = { side: "sell", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "ถึงราคาเป้าหมาย (forecast)" };
+          });
+          if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
+        } catch (err) {
+          console.error(`[auto:${market}] forecast target sell failed for ${uid}:`, err.message);
+          keepChecking2 = false;
+        }
       }
     }
 
