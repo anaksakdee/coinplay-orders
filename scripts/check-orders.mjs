@@ -39,6 +39,11 @@ const SPIKE_ATR_MULTIPLE = 1.5;  // ต้องยาวกว่าควา�
 // จึงเลือก 50% เป็นจุดสมดุล: ได้ผลตอบแทน ~2.8 เท่าของเดิม แต่ยังเหลือเหรียญอีกครึ่งไว้กันเหนียว
 const SPIKE_TRADE_PCT = 0.50;
 const SPIKE_MAX_OPEN = 3;        // เปิดรอบซื้อคืนพร้อมกันได้สูงสุด 3 รอบ (ให้เงินสดหมุนต่อ)
+// forecast-target sell เดิมใช้ fl.lastSell ช่องเดียวรอซื้อคืน — ทดสอบย้อนหลัง 9 ปีพบว่าตอนตลาดขาขึ้นแรง
+// ต่อเนื่อง (เช่นปี 2020 +303%) เงินจะค้างรอราคาย่อที่ไม่มาถึง และบล็อกไม่ให้ซื้อไม้ใหม่ทั้งระบบ
+// เปลี่ยนเป็นคิวหลายช่องเหมือนไม้เขียวยาว (orders[] ทำเครื่องหมาย forecast:true แยกโควตาต่างหาก)
+// ผลทดสอบ 9 ปี x 8 รอบ: เทียบถือยาว -34.08% (ช่องเดียว) -> -16.51% (คิวหลายช่อง) ดีขึ้นทุกรอบ
+const FORECAST_MAX_OPEN = 3;
 const SPIKE_RETRACE = 0.20;      // ตั้งไม้สวนที่ 20% ของลำตัวไม้ — ตรึงไว้ ห้ามขยายให้ลึกกว่านี้ (ดูเหตุผลด้านล่าง)
 const SPIKE_FEE_SAFETY = 2.5;    // ส่วนต่างที่จะได้ ต้องมากกว่าค่าธรรมเนียมไป-กลับอย่างน้อยเท่านี้
 
@@ -689,13 +694,15 @@ async function processAutoTrade(db, messaging, market, price, candles) {
             const fa = fl && fl.autoTrade;
             if (!fa || !fa.enabled || !fl.lots || !fl.lots.length) return;
 
+            const openForecast = (fl.orders || []).filter((o) => o.forecast).length;
+
             const lots = fl.lots.map((l) => ({ ...l }));
             let lot = null;
             for (const l of lots) {
               if (l.sleeve === "core") continue;
               l.fcTarget = Math.max(l.fcTarget || 0, forecast.p90);
               const netPnlPct = (price * (1 - feeRate) / (l.price * (1 + feeRate)) - 1) * 100;
-              if (price >= l.fcTarget && netPnlPct > 0) { lot = l; break; }
+              if (price >= l.fcTarget && netPnlPct > 0 && openForecast < FORECAST_MAX_OPEN) { lot = l; break; }
             }
             // เขียนเป้าหมายที่รี้ดขึ้นกลับไปเสมอ แม้ยังไม่ถึงเป้า จะได้รี้ดต่อจากค่านี้ในรอบหน้า
             tx.update(userRef, { [`${ledgerKey}.lots`]: lots });
@@ -704,15 +711,23 @@ async function processAutoTrade(db, messaging, market, price, candles) {
             const result = sellSpecificLot(fl, lot, price, feeRate);
             if (!result) return;
             const equity = result.ledger.cash + result.ledger.btc * price;
-            const lastSell = { price, usd: result.amount, qty: result.qty, ts: now };
-            const reasonText = `ถึงราคาเป้าหมายจาก Monte Carlo: ไม้นี้ซื้อที่ ${round2(lot.price)} ตอนนี้ราคา ${round2(price)} ถึงเป้าหมายที่คาดการณ์ไว้ ${round2(lot.fcTarget)} แล้ว (กำไรสุทธิ +${((price * (1 - feeRate) / (lot.price * (1 + feeRate)) - 1) * 100).toFixed(2)}%) จึงขายทำกำไรทั้งไม้`;
+            // ตั้งคำสั่งซื้อคืนแบบคิวหลายช่อง (เหมือนไม้เขียวยาว) แทน fl.lastSell ช่องเดียว — กันบล็อกทั้งระบบ
+            // ตอนตลาดขาขึ้นแรงต่อเนื่องแล้วราคาไม่ย่อกลับมาถึงเพดานซื้อคืน (ดู FORECAST_MAX_OPEN ด้านบน)
+            const rebuyTarget = round2(btcAccumCeiling(price, feeRate, BTC_ACCUM_TARGET));
+            const rebuyOrder = {
+              id: "fct" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+              side: "buy", targetPrice: rebuyTarget,
+              amount: round2((result.amount * (1 - feeRate)) / (1 + feeRate)),
+              createdAt: now, forecast: true,
+            };
+            const reasonText = `ถึงราคาเป้าหมายจาก Monte Carlo: ไม้นี้ซื้อที่ ${round2(lot.price)} ตอนนี้ราคา ${round2(price)} ถึงเป้าหมายที่คาดการณ์ไว้ ${round2(lot.fcTarget)} แล้ว (กำไรสุทธิ +${((price * (1 - feeRate) / (lot.price * (1 + feeRate)) - 1) * 100).toFixed(2)}%) จึงขายทำกำไรทั้งไม้ แล้วตั้งซื้อคืนอัตโนมัติไว้ที่ ${rebuyTarget}`;
 
             tx.update(userRef, {
               [`${ledgerKey}.cash`]: result.ledger.cash,
               [`${ledgerKey}.btc`]: result.ledger.btc,
               [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
               [`${ledgerKey}.lots`]: result.ledger.lots,
-              [`${ledgerKey}.lastSell`]: lastSell,
+              [`${ledgerKey}.orders`]: (fl.orders || []).concat([rebuyOrder]),
             });
 
             const tradeRef = db.collection("trades").doc();
@@ -752,12 +767,11 @@ async function processAutoTrade(db, messaging, market, price, candles) {
         if (!fa || !fa.enabled) return;
 
         const cash = fl.cash || 0;
-        const lastSell = fl.lastSell;
         const minTicket = market === "bitkub" ? 100 : 5; // ขั้นต่ำจริงของตลาด (Binance ~$5, Bitkub ~฿100) ไม้เล็กกว่านี้สั่งจริงไม่ผ่าน
         const blockers = [];
 
-        // ขา core ต้องมาก่อนด่านรอซื้อคืน — เดิมอยู่หลังด่านนี้ ทำให้ตอนมีคำสั่งซื้อคืนค้าง
-        // (เคยค้างนานถึง 165 วัน) การสะสมระยะยาวถูกบล็อกไปด้วยทั้งที่ไม่เกี่ยวข้องกัน
+        // ขา core ต้องมาก่อน — เดิมมีด่าน "รอซื้อคืนจาก lastSell ช่องเดียว" อยู่ตรงนี้ด้วย แต่ย้ายออกไปเป็น
+        // คิวหลายช่องใน orders[] แล้ว (ดู FORECAST_MAX_OPEN และ 1c ด้านบน) จึงไม่บล็อกขา core/signal buy อีกต่อไป
         const coreDue = now - (fa.lastCoreBuyAt || 0) >= CORE_BUY_INTERVAL_MS;
         const startCap = STARTING_BALANCE[market];
         const coreSpent = fa.coreSpent || 0;
@@ -796,57 +810,7 @@ async function processAutoTrade(db, messaging, market, price, candles) {
           }
         }
 
-        // 2a) ถ้ามีเงินค้างจากการขายรอบก่อน -> ต้องซื้อคืนให้ได้เหรียญมากกว่าเดิมเท่านั้น
-        if (lastSell && lastSell.qty > 0) {
-          const ceiling = btcAccumCeiling(lastSell.price, feeRate, BTC_ACCUM_TARGET);
-          if (price > ceiling) {
-            const gapPct = (price / ceiling - 1) * 100;
-            await writeDecision(tx, uid, fresh.email, "hold",
-              `รอซื้อคืน: ขายไปแล้ว ${lastSell.qty.toFixed(8)} BTC ที่ราคา ${round2(lastSell.price)} ตอนนี้ราคา ${round2(price)} ยังสูงกว่าเพดานซื้อคืน ${round2(ceiling)} อยู่ ${gapPct.toFixed(2)}% ถ้าซื้อคืนตอนนี้จะได้เหรียญน้อยกว่าที่ขายไป (เสียให้ค่าธรรมเนียม 2 ขา) จึงถือเงินสดรอให้ราคาย่อลงมาก่อน`,
-              { trigger: "waiting_rebuy", rebuyCeiling: round2(ceiling), gapToCeilingPct: round2(gapPct), cashIdle: round2(cash) });
-            holdCount++;
-            return;
-          }
-          // ราคาถึงเพดานแล้ว -> ซื้อคืนด้วยเงินจากการขายรอบนั้นพอดี
-          const buyAmount = (lastSell.usd * (1 - feeRate)) / (1 + feeRate);
-          const result = applyTrade(fl, "buy", buyAmount, price, feeRate);
-          if (!result) return;
-          const btcDelta = result.qty - lastSell.qty;
-          const newAuto = Object.assign({}, fa, {
-            lastBuyAt: now,
-            roundTrips: (fa.roundTrips || 0) + 1,
-            btcAccumulated: (fa.btcAccumulated || 0) + btcDelta,
-          });
-          const equity = result.ledger.cash + result.ledger.btc * price;
-
-          tx.update(userRef, {
-            [`${ledgerKey}.cash`]: result.ledger.cash,
-            [`${ledgerKey}.btc`]: result.ledger.btc,
-            [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-            [`${ledgerKey}.lots`]: result.ledger.lots,
-            [`${ledgerKey}.autoTrade`]: newAuto,
-            [`${ledgerKey}.lastSell`]: null,
-          });
-          const rebuyReason = `ซื้อคืนปิดรอบสำเร็จ: ราคาลงมาที่ ${round2(price)} ต่ำกว่าเพดาน ${round2(btcAccumCeiling(lastSell.price, feeRate, BTC_ACCUM_TARGET))} แล้ว จึงซื้อคืนด้วยเงินที่ได้จากการขายรอบนั้น ขายไป ${lastSell.qty.toFixed(8)} BTC ซื้อกลับได้ ${result.qty.toFixed(8)} BTC เพิ่มขึ้น ${btcDelta >= 0 ? "+" : ""}${(result.qty / lastSell.qty * 100 - 100).toFixed(3)}% — นี่คือกำไรที่เป็นจำนวนเหรียญจริง`;
-          const tradeRef = db.collection("trades").doc();
-          tx.set(tradeRef, {
-            uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
-            price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-            autoTrade: true, sleeve: "swing", trigger: "rebuy_complete", reason: rebuyReason, ts: Timestamp.now(),
-          });
-          await writeDecision(tx, uid, fresh.email, "buy", rebuyReason,
-            {
-              trigger: "rebuy_complete", sleeve: "swing",
-              btcSold: lastSell.qty, btcBought: result.qty, btcDelta,
-              btcDeltaPct: round2((result.qty / lastSell.qty - 1) * 100),
-              roundTrips: newAuto.roundTrips, btcAccumulatedTotal: newAuto.btcAccumulated,
-            });
-          buyCount++; didSomething = true;
-          notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "ซื้อคืนปิดรอบ" };
-          return;
-        }
-
-        // 2b) ไม่มีเงินค้างรอซื้อคืน -> พิจารณาเปิดไม้ใหม่ตามคะแนนสัญญาณ
+        // พิจารณาเปิดไม้ใหม่ตามคะแนนสัญญาณ (ไม้แดงยาว)
         if (cash < minTicket) {
           await writeDecision(tx, uid, fresh.email, "hold",
             `ไม่ซื้อ: เงินสดคงเหลือ ${round2(cash)} น้อยเกินกว่าจะเปิดไม้ใหม่ได้ (ขั้นต่ำ ${minTicket}) — เงินถูกแปลงเป็น BTC ไปเกือบหมดแล้ว ระบบจะรอจังหวะขายทำกำไรเพื่อให้มีเงินสดกลับมาหมุนต่อ`,
