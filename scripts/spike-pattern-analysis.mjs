@@ -2,9 +2,10 @@
 // มักทำซ้ำๆ หรือไม่ เพื่อประกอบการดูจังหวะที่อาจเกิดไม้ยาวในอนาคต (ไม่ใช่การเทรดอัตโนมัติ แค่รายงานวิเคราะห์)
 //
 // ใช้เกณฑ์ตรวจจับไม้ยาวเดียวกับระบบจริง (scripts/check-orders.mjs: detectSpike) เพื่อให้ผลตรงกับที่ระบบใช้จริง
-// วิเคราะห์ 5 มุม: (1) ช่วงเวลาที่มักเกิด (ชม./วันในสัปดาห์) (2) ระดับราคาที่มักเกิด (เลขกลม/แนวรับ-ต้าน)
+// วิเคราะห์ 6 มุม: (1) ช่วงเวลาที่มักเกิด (ชม./วันในสัปดาห์) (2) ระดับราคาที่มักเกิด (เลขกลม/แนวรับ-ต้าน)
 // (3) ความถี่ในการเกิดซ้ำ (จังหวะห่างกันคงที่ไหม) (4) ปริมาณซื้อขาย (volume) ตอนเกิดไม้ยาว
-// (5) สถานการณ์ตลาด (ขาขึ้น/ขาลง/ไซด์เวย์) ในแต่ละช่วงเวลา — รายปี + แยกตาม regime
+// (5) สถานการณ์ตลาด (ขาขึ้น/ขาลง/ไซด์เวย์) จากราคา — รายปี + แยกตาม regime
+// (6) เหตุการณ์โลกจริง (ข่าว/เหตุการณ์ที่รู้จักกันดี) เทียบกับช่วงที่ไม้ยาวเกิด
 //
 // รันเอง: node scripts/spike-pattern-analysis.mjs
 import { readFileSync, writeFileSync, existsSync } from "fs";
@@ -17,6 +18,36 @@ const SPIKE_MIN_BODY = (SPIKE_FEE_SAFETY * (2 * FEE * 100)) / SPIKE_RETRACE; // 
 const VOL_CACHE = "scripts/.cache/btc-1h-10y-vol.json";
 const REGIME_WINDOW_H = 90 * 24; // ใช้ผลตอบแทนย้อนหลัง 90 วัน จัดว่าเป็นขาขึ้น/ขาลง/ไซด์เวย์
 const REGIME_THRESHOLD = 0.20;   // >+20% = ขาขึ้น, <-20% = ขาลง, ระหว่างนั้น = ไซด์เวย์
+
+// เหตุการณ์โลกจริงที่รู้จักกันดีว่ากระทบราคา BTC — ใช้เทียบว่าไม้ยาวกระจุกตัวตรงกับข่าวจริงไหม
+// (ต่างจาก regime ในมุมที่ 5 ซึ่งคำนวณจากราคาล้วนๆ อันนี้คือเหตุการณ์จริงจากข่าว)
+const EVENTS = [
+  { d: "2017-12-17", label: "BTC ทำ ATH รอบ ICO boom ~$19,783" },
+  { d: "2018-01-01", label: "เริ่ม \"Crypto Winter\" 2018 — ราคาร่วงต่อเนื่องทั้งปี" },
+  { d: "2020-03-12", label: "\"Black Thursday\" — COVID crash ราคาร่วง ~50% ในวันเดียว" },
+  { d: "2020-05-11", label: "Bitcoin Halving ครั้งที่ 3" },
+  { d: "2021-04-14", label: "Coinbase IPO — BTC ทำ ATH ใหม่ ~$64,800" },
+  { d: "2021-05-19", label: "จีนแบนขุด Bitcoin — ราคาร่วง ~30% ในวันเดียว" },
+  { d: "2021-11-10", label: "BTC ทำ ATH ~$69,000 (จุดสูงสุดรอบ 2021)" },
+  { d: "2022-05-09", label: "Terra/Luna ล่มสลาย" },
+  { d: "2022-06-12", label: "Celsius ระงับถอนเงิน / เริ่มวิกฤต 3AC" },
+  { d: "2022-11-11", label: "FTX ล้มละลาย" },
+  { d: "2023-03-10", label: "วิกฤตธนาคาร SVB / USDC หลุด peg" },
+  { d: "2024-01-10", label: "US อนุมัติ Spot Bitcoin ETF" },
+  { d: "2024-04-20", label: "Bitcoin Halving ครั้งที่ 4" },
+  { d: "2024-11-06", label: "Trump ชนะเลือกตั้ง — ราคาพุ่งแรง" },
+  { d: "2024-12-05", label: "BTC ทะลุ $100,000 ครั้งแรกในประวัติศาสตร์" },
+  { d: "2025-01-20", label: "Trump สาบานตนรับตำแหน่ง — ราคาพุ่งใกล้ $110,000" },
+  { d: "2025-04-07", label: "ราคาร่วงลงต่ำสุด ~$74,000 (ปรับฐาน -30% จากพีค)" },
+  { d: "2025-10-06", label: "BTC ทำ ATH ใหม่ $126,210" },
+  { d: "2025-12-01", label: "BTC ทะลุ $100,000 อีกครั้ง ปิดปีแข็งแกร่ง" },
+  { d: "2026-01-15", label: "BTC ทำจุดสูงสุดของปี 2026 ที่ $97,008" },
+  { d: "2026-02-06", label: "ราคาร่วง 15% ในวันเดียวเหลือ ~$60,000 (-52% จาก ATH)" },
+  { d: "2026-02-25", label: "Trump ประกาศภาษีนำเข้า 15% ทั่วโลก — ตัดความหวังลดดอกเบี้ย" },
+  { d: "2026-04-15", label: "รีบาวด์ฤดูใบไม้ผลิ +13.6% แต่ชะงักที่ ~$82,000" },
+  { d: "2026-06-01", label: "ขาลงรอบสอง -14.2% ราคาต่ำสุดของปีที่ $60,862" },
+  { d: "2026-06-03", label: "Mt. Gox โยกย้าย BTC 10,422 เหรียญ (~$739M) — ความกลัวเจ้าหนี้เทขายก่อนกำหนดคืนเงิน ต.ค. 2026" },
+];
 
 async function fetchAllKlinesWithVolume() {
   if (existsSync(VOL_CACHE)) {
@@ -218,6 +249,38 @@ function regimeAndYearAnalysis(spikes, candles, regimes) {
   if (untagged) console.log(`  (${untagged} ไม้ยาวอยู่ในช่วง 90 วันแรกที่ยังไม่มีข้อมูลย้อนหลังพอจัด regime — ข้ามไป)`);
 }
 
+// ---------- 6) เทียบกับเหตุการณ์โลกจริง ----------
+// ต่างจากมุมที่ 5: อันนี้ใช้ "ข่าวจริง" ไม่ใช่ตัวเลขที่คำนวณจากราคา — เช็คว่ารอบเหตุการณ์ใหญ่แต่ละครั้ง
+// (±EVENT_WINDOW_DAYS วัน) มีไม้ยาวกระจุกตัวมากกว่าค่าเฉลี่ยทั่วไปหรือไม่
+const EVENT_WINDOW_DAYS = 3;
+function eventCorrelation(spikes, candles) {
+  console.log(`\n=== 6) เทียบกับเหตุการณ์โลกจริงที่รู้จักกันดี (นับไม้ยาวภายใน ±${EVENT_WINDOW_DAYS} วันรอบวันเกิดเหตุ) ===`);
+  const totalDays = (candles[candles.length - 1].t - candles[0].t) / 86400e3;
+  const baselinePerWindow = (spikes.length / totalDays) * (EVENT_WINDOW_DAYS * 2 + 1);
+  console.log(`(baseline: ถ้าไม้ยาวกระจายสม่ำเสมอทั้ง ${totalDays.toFixed(0)} วัน ควรเจอเฉลี่ย ${baselinePerWindow.toFixed(2)} ครั้งต่อหน้าต่าง ${EVENT_WINDOW_DAYS * 2 + 1} วัน)\n`);
+
+  let hits = 0, dataAvailable = 0, totalNearby = 0;
+  for (const ev of EVENTS) {
+    const evTime = new Date(ev.d + "T00:00:00Z").getTime();
+    if (evTime < candles[0].t || evTime > candles[candles.length - 1].t) continue; // นอกช่วงข้อมูล
+    dataAvailable++;
+    const windowMs = EVENT_WINDOW_DAYS * 86400e3;
+    const nearby = spikes.filter((s) => Math.abs(s.t - evTime) <= windowMs);
+    const flag = nearby.length >= 2 ? " <-- กระจุกตัวชัดเจน" : nearby.length >= 1 ? " <-- มีไม้ยาวร่วมด้วย" : "";
+    if (nearby.length >= 1) hits++;
+    totalNearby += nearby.length;
+    console.log(`  ${ev.d} ${ev.label}: ไม้ยาว ${nearby.length} ครั้ง${nearby.length ? " (" + nearby.map((s) => `${s.direction === "up" ? "เขียว" : "แดง"} ${s.bodyPct.toFixed(1)}%`).join(", ") + ")" : ""}${flag}`);
+  }
+  // baseline ที่ถูกต้อง: ใช้ Poisson P(>=1 ครั้ง) = 1 - e^(-lambda) ไม่ใช่ lambda ตรงๆ (lambda อาจเกิน 1 ทำให้ % เพี้ยน)
+  const baselineHitRate = (1 - Math.exp(-baselinePerWindow)) * 100;
+  const avgNearby = totalNearby / dataAvailable;
+  console.log(`\nสรุป: ${hits}/${dataAvailable} เหตุการณ์ใหญ่ (${(hits / dataAvailable * 100).toFixed(0)}%) มีไม้ยาวเกิดร่วมด้วยภายใน ±${EVENT_WINDOW_DAYS} วัน (baseline สุ่ม = ${baselineHitRate.toFixed(0)}%)`);
+  console.log(`เฉลี่ยไม้ยาวต่อเหตุการณ์ ${avgNearby.toFixed(2)} ครั้ง (baseline สุ่ม = ${baselinePerWindow.toFixed(2)} ครั้ง)`);
+  console.log(avgNearby > baselinePerWindow * 1.3
+    ? "-> จำนวนไม้ยาวเฉลี่ยต่อเหตุการณ์สูงกว่า baseline สุ่มพอสมควร มีสัญญาณว่าเหตุการณ์โลกจริงกระตุ้นไม้ยาวได้จริง"
+    : "-> ตัวเลขใกล้เคียง baseline สุ่มมาก (ไม้ยาวเกิดถี่อยู่แล้วในหลาย regime ที่ผันผวน) — อย่าตีความว่าเหตุการณ์โลก \"ทำให้เกิด\" ไม้ยาวเกินจริง ส่วนใหญ่คือช่วงเวลานั้นผันผวนสูงอยู่แล้วพอดี");
+}
+
 const candles = await fetchAllKlinesWithVolume();
 const days = ((candles[candles.length - 1].t - candles[0].t) / 86400e3).toFixed(0);
 console.log(`ข้อมูลจริง BTCUSDT 1h ${candles.length} แท่ง (~${days} วัน = ~${(days / 365).toFixed(1)} ปี) | ราคา ${candles[0].c.toFixed(0)} -> ${candles[candles.length - 1].c.toFixed(0)}`);
@@ -231,3 +294,4 @@ priceLevelAnalysis(spikes);
 recurrenceAnalysis(spikes);
 volumeAnalysis(spikes, candles);
 regimeAndYearAnalysis(spikes, candles, regimeSeries(candles));
+eventCorrelation(spikes, candles);
