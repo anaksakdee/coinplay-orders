@@ -188,7 +188,8 @@ function newDca(){
 }
 function newAutoTrade(){
   // roundTrips/btcAccumulated = ผลงานจริงของระบบตามเป้าหมาย "ได้จำนวน BTC เพิ่มขึ้น" (ไม่ใช่กำไรเป็นเงิน)
-  return { enabled:false, buyAmount:0, lastBuyAt:null, roundTrips:0, btcAccumulated:0 };
+  // minBuyFrac/maxBuyFrac = ช่วง % ของเงินสดที่ยอมลงต่อไม้ swing หนึ่งครั้ง ปรับเองได้ (ดีฟอลต์ตรงกับที่ฝั่งเซิร์ฟเวอร์ใช้ถ้าไม่ตั้ง)
+  return { enabled:false, buyAmount:0, lastBuyAt:null, roundTrips:0, btcAccumulated:0, minBuyFrac:0.15, maxBuyFrac:0.6 };
 }
 
 function newLedger(startingCash){
@@ -881,14 +882,20 @@ function saveAutoTrade(){
   var buyAmount = parseFloat(document.getElementById('auto-trade-amount').value)||0;
   if (enabled && buyAmount<=0) return;
   var prevAuto = acc.autoTrade || newAutoTrade();
+  var minPct = parseFloat(document.getElementById('auto-trade-min-frac').value);
+  var maxPct = parseFloat(document.getElementById('auto-trade-max-frac').value);
+  var minBuyFrac = (minPct>0 && minPct<=100) ? minPct/100 : (prevAuto.minBuyFrac || 0.15);
+  var maxBuyFrac = (maxPct>0 && maxPct<=100) ? maxPct/100 : (prevAuto.maxBuyFrac || 0.6);
+  if (maxBuyFrac < minBuyFrac) { var tmp = minBuyFrac; minBuyFrac = maxBuyFrac; maxBuyFrac = tmp; }
   acc.autoTrade = {
     enabled: enabled, buyAmount: buyAmount, lastBuyAt: prevAuto.lastBuyAt || null,
-    roundTrips: prevAuto.roundTrips || 0, btcAccumulated: prevAuto.btcAccumulated || 0
+    roundTrips: prevAuto.roundTrips || 0, btcAccumulated: prevAuto.btcAccumulated || 0,
+    minBuyFrac: minBuyFrac, maxBuyFrac: maxBuyFrac
   };
   var updateObj = {};
   updateObj[LEDGER_KEY[activeExchange]+'.autoTrade'] = acc.autoTrade;
   updateDoc(doc(db,'users',currentUid), updateObj).catch(function(err){ console.error('saveAutoTrade failed', err); });
-  writeLog('auto_trade_settings_saved', { market:activeExchange, enabled:enabled, buyAmount: Math.round(buyAmount*100)/100 });
+  writeLog('auto_trade_settings_saved', { market:activeExchange, enabled:enabled, buyAmount: Math.round(buyAmount*100)/100, minBuyFrac: minBuyFrac, maxBuyFrac: maxBuyFrac });
   renderAutoTradePanel();
 }
 
@@ -899,6 +906,8 @@ function renderAutoTradePanel(){
   var at = (acc && acc.autoTrade) || newAutoTrade();
   enabledEl.checked = !!at.enabled;
   document.getElementById('auto-trade-amount').value = at.buyAmount || AUTO_TRADE_DEFAULT_AMT[activeExchange];
+  document.getElementById('auto-trade-min-frac').value = Math.round((at.minBuyFrac || 0.15) * 100);
+  document.getElementById('auto-trade-max-frac').value = Math.round((at.maxBuyFrac || 0.6) * 100);
 
   var statusEl = document.getElementById('auto-trade-status');
   var sigEl = document.getElementById('auto-trade-signal');

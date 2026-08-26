@@ -186,6 +186,12 @@
         <input type="number" id="auto-trade-amount" placeholder="จำนวนเงินซื้อ (ถ้ายังไม่มีประวัติขาย)" min="0" step="10">
         <button type="button" class="btn btn-buy" id="btn-save-auto-trade" style="flex:0 0 auto;padding:9px 16px;">บันทึก</button>
       </div>
+      <div class="amt-row">
+        <label class="dca-toggle" style="flex:0 0 auto;">ขนาดไม้ซื้อ (% ของเงินสด):</label>
+        <input type="number" id="auto-trade-min-frac" placeholder="ต่ำสุด (มั่นใจน้อย/เสี่ยงร่วงอีก)" min="1" max="100" step="1">
+        <input type="number" id="auto-trade-max-frac" placeholder="สูงสุด (มั่นใจมาก/ไม่น่าลงอีก)" min="1" max="100" step="1">
+      </div>
+      <div class="login-note" style="border:none;padding-top:0;padding-bottom:4px;">ระบบเลือกขนาดในช่วงนี้เองตามคะแนนสัญญาณ — มั่นใจมากยิ่งเข้าใกล้ "สูงสุด" มั่นใจน้อยยิ่งเข้าใกล้ "ต่ำสุด" (ค่าเริ่มต้น 15%-60%)</div>
       <div class="score-box" id="auto-trade-score">—</div>
       <div class="login-note" id="auto-trade-status" style="border:none;padding-top:0;">—</div>
       <div class="login-note" id="auto-trade-signal" style="border:none;padding-top:0;">—</div>

@@ -880,7 +880,7 @@ async function processAutoTrade(db, messaging, market, price, candles) {
           return;
         }
 
-        const frac = positionFraction(score, analysis.atrPct);
+        const frac = positionFraction(score, analysis.atrPct, fa.minBuyFrac, fa.maxBuyFrac);
         const amount = Math.max(minTicket, cash * frac);
         const result = applyTrade(fl, "buy", amount, price, feeRate);
         if (!result) return;

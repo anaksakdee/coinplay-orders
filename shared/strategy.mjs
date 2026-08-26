@@ -313,13 +313,18 @@ export function describeScore(score) {
 }
 
 // ขนาดไม้ตามความมั่นใจ + ความผันผวน (Kelly แบบง่าย): มั่นใจมาก/ผันผวนต่ำ = ลงหนักขึ้น
-export function positionFraction(score, atrPct) {
+// minFrac/maxFrac ให้ผู้ใช้ปรับช่วงขนาดไม้เองได้ (ค่าเริ่มต้น 15%-60% เหมือนเดิมถ้าไม่ส่งมา)
+// floor ปลอดภัยตอนผันผวนสูงยังคงต่ำกว่า minFrac ได้ (ครึ่งหนึ่งของ minFrac) เพื่อรักษากลไกหั่นไม้ตอนผันผวนไว้เหมือนเดิม
+export function positionFraction(score, atrPct, minFrac, maxFrac) {
+  const lo = (minFrac != null && minFrac > 0) ? minFrac : 0.15;
+  const hi = (maxFrac != null && maxFrac > 0) ? maxFrac : 0.6;
+  const floor = (minFrac != null && minFrac > 0) ? minFrac * 0.5 : 0.08;
   const conf = Math.max(0, Math.min(1, (score - THRESHOLDS.weakBuy) / (100 - THRESHOLDS.weakBuy)));
-  let frac = 0.15 + conf * 0.45; // 15%-60% ของเงินสดที่จัดสรรให้ swing
+  let frac = lo + conf * (hi - lo);
   if (atrPct != null && atrPct > 0) {
     // ผันผวนสูงกว่า 1%/แท่ง เริ่มหั่นขนาดไม้ลง
     const volAdj = Math.min(1, 1.0 / Math.max(0.35, atrPct));
     frac *= volAdj;
   }
-  return Math.max(0.08, Math.min(0.6, frac));
+  return Math.max(floor, Math.min(hi, frac));
 }
