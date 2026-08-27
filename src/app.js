@@ -180,7 +180,6 @@ document.getElementById('btn-acknowledge').addEventListener('click', function(){
   enterApp();
 });
 
-var DCA_DEFAULT_AMT = { binance:20, bitkub:500 };
 var AUTO_TRADE_DEFAULT_AMT = { binance:20, bitkub:500 };
 
 function newDca(){
@@ -349,7 +348,7 @@ function updateExchangeUI(){
   document.getElementById('fee-note').textContent = 'คิดค่าธรรมเนียม '+(activeFeeRate()*100).toFixed(2)+'% ต่อคำสั่ง (เท่ากับอัตรามาตรฐานของ'+(activeExchange==='bitkub'?'Bitkub':'Binance')+') หักจากเงินสดอัตโนมัติทุกครั้งที่ซื้อ/ขาย';
   document.getElementById('topup-note').textContent = 'เป็นเงินจำลองสำหรับฝึกเทรดเท่านั้น ไม่ใช่เงินจริง เติมได้ไม่จำกัดจำนวนครั้ง แต่ละครั้งไม่เกิน '+fmtMkt(TOPUP_CAP[activeExchange],0)+' การเติมเงินจะถูกบันทึกไว้เพื่อการวิเคราะห์เช่นกัน';
 
-  if (currentAccount){ renderAccount(); renderHistory(); renderPendingOrders(); renderDcaPanel(); renderAutoTradePanel(); }
+  if (currentAccount){ renderAccount(); renderHistory(); renderPendingOrders(); renderAutoTradePanel(); }
   if (marketStarted){ renderTradePoints(); renderSellPlan(); }
 }
 
@@ -821,54 +820,12 @@ function doReset(){
   updateDoc(doc(db,'users',currentUid), updateObj)
     .then(function(){ return writeLog('reset_account', { market: activeExchange }); })
     .catch(function(err){ console.error('reset failed', err); })
-    .finally(function(){ tradeBusy=false; setBusy(false); renderAccount(); renderSellPlan(); renderPendingOrders(); renderDcaPanel(); renderAutoTradePanel(); });
+    .finally(function(){ tradeBusy=false; setBusy(false); renderAccount(); renderSellPlan(); renderPendingOrders(); renderAutoTradePanel(); });
 }
 
-/* ---------------- DCA อัตโนมัติ (ซื้อ BTC จำนวนคงที่ตามรอบเวลา เพื่อเก็บสะสม) ---------------- */
-// การยิงคำสั่งจริงทำที่ฝั่งเซิร์ฟเวอร์ (GitHub Actions cron รันทุก ~5 นาที ผ่าน Firebase Admin SDK)
-// เพื่อให้ทำงานได้แม้ไม่เปิดหน้านี้ค้างไว้ — ฝั่งนี้มีหน้าที่แค่บันทึก/แสดงการตั้งค่าเท่านั้น
-function saveDca(){
-  if (!currentAccount || !currentUid) return;
-  var acc = ledger();
-  var enabled = document.getElementById('dca-enabled').checked;
-  var amount = parseFloat(document.getElementById('dca-amount').value)||0;
-  var intervalHours = parseFloat(document.getElementById('dca-interval').value)||24;
-  if (enabled && amount<=0) return;
-  acc.dca = { enabled: enabled, amount: amount, intervalHours: intervalHours, lastRun: (acc.dca && acc.dca.lastRun) || null };
-  var updateObj = {};
-  updateObj[LEDGER_KEY[activeExchange]+'.dca'] = acc.dca;
-  updateDoc(doc(db,'users',currentUid), updateObj).catch(function(err){ console.error('saveDca failed', err); });
-  writeLog('dca_settings_saved', { market:activeExchange, enabled:enabled, amount: Math.round(amount*100)/100, intervalHours: intervalHours });
-  renderDcaPanel();
-}
-
-function intervalLabel(hours){
-  if (hours>=168 && hours%168===0) return 'ทุก '+(hours/168)+' สัปดาห์';
-  if (hours>=24 && hours%24===0) return 'ทุก '+(hours/24)+' วัน';
-  return 'ทุก '+hours+' ชั่วโมง';
-}
-
-function renderDcaPanel(){
-  var enabledEl = document.getElementById('dca-enabled');
-  if (!enabledEl) return;
-  var acc = ledger();
-  var dca = (acc && acc.dca) || newDca();
-  enabledEl.checked = !!dca.enabled;
-  document.getElementById('dca-amount').value = dca.amount || DCA_DEFAULT_AMT[activeExchange];
-  document.getElementById('dca-interval').value = String(dca.intervalHours || 24);
-
-  var statusEl = document.getElementById('dca-status');
-  if (!dca.enabled){
-    statusEl.textContent = 'ยังไม่ได้เปิดใช้งาน — เปิดแล้วระบบจะซื้อ BTC ให้อัตโนมัติตามจำนวนเงินและรอบเวลาที่ตั้งไว้ ทำงานฝั่งเซิร์ฟเวอร์ (เช็คทุก ~5 นาที) ให้แม้ไม่เปิดหน้านี้ค้างไว้ก็ตาม';
-  } else {
-    var next = dca.lastRun ? dca.lastRun + dca.intervalHours*3600*1000 : Date.now();
-    var nextStr = next<=Date.now() ? 'รอบถัดไปภายใน ~5 นาที' : new Date(next).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-    var lastStr = dca.lastRun ? new Date(dca.lastRun).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'ยังไม่เคยทำงาน';
-    statusEl.textContent = 'เปิดใช้งานอยู่ — ซื้อ '+fmtMkt(dca.amount,0)+' '+intervalLabel(dca.intervalHours)+' · ทำงานล่าสุด: '+lastStr+' · '+nextStr;
-  }
-}
-
-document.getElementById('btn-save-dca').addEventListener('click', saveDca);
+// ฟีเจอร์ DCA อัตโนมัติ (ซื้อ BTC จำนวนคงที่ตามรอบเวลา) ถอดออกแล้วตามคำขอ — ออกแบบไว้สำหรับบัญชีที่เติม
+// ทุนใหม่เข้ามาเรื่อยๆ แต่บัญชีนี้ใช้ทุนก้อนเดียวคงที่ ไม่มีการเติมเงินเพิ่ม ฟิลด์ dca ในสคีมายังเก็บไว้เฉยๆ
+// (ไม่มีอะไรอ่าน/เขียนอีกแล้ว) เผื่อผู้ใช้เก่าที่เคยตั้งค่าไว้ ไม่ต้อง migrate schema
 
 /* ---------------- ออโต้เทรดเต็มรูปแบบ (ซื้อ-ขายอัตโนมัติตามสัญญาณ) ---------------- */
 // การตัดสินใจจริงทำที่ฝั่งเซิร์ฟเวอร์ (check-orders.mjs) โดยใช้โมเดลรวมสัญญาณเดียวกับที่แสดงผลตรงนี้

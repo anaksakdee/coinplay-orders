@@ -195,26 +195,7 @@
       <div class="score-box" id="auto-trade-score">—</div>
       <div class="login-note" id="auto-trade-status" style="border:none;padding-top:0;">—</div>
       <div class="login-note" id="auto-trade-signal" style="border:none;padding-top:0;">—</div>
-      <div class="login-note" style="border:none;padding-top:0;"><b>เป้าหมาย: ได้จำนวน BTC เพิ่มขึ้น</b> (ไม่ใช่แค่กำไรเป็นเงิน) — ขายตอนราคาสูง แล้วบังคับซื้อคืนที่ราคาต่ำพอที่จะได้เหรียญกลับมามากกว่าเดิมอย่างน้อย 1% หลังหักค่าธรรมเนียมทั้งสองขาแล้ว ถ้าราคายังไม่ลงถึงจุดนั้นระบบจะถือเงินสดรอ ไม่ซื้อคืนแพงเด็ดขาด · ซื้อเมื่อสัญญาณรวมไม่ชี้ขาลง · ขายทำกำไร 2%/รอบ ตัดขาดทุนเฉพาะตอนจำเป็นจริงๆ (ขาดทุน 5% + ยืนยันขาลง) · ทำงานฝั่งเซิร์ฟเวอร์แม้ปิดหน้านี้ — เป็นแบบจำลองสถิติ ไม่ใช่คำแนะนำการลงทุน และไม่รับประกันกำไร</div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="panel-head"><h2>ออโต้เทรด DCA (เก็บ BTC สม่ำเสมอ)</h2><span class="sub">ซื้อ BTC จำนวนคงที่ทุกรอบเวลาอัตโนมัติ ไม่สนราคาขึ้นลง</span></div>
-    <div class="order-form" style="padding:14px 18px 6px;">
-      <div class="amt-row">
-        <label class="dca-toggle"><input type="checkbox" id="dca-enabled"> เปิดใช้งาน</label>
-        <input type="number" id="dca-amount" placeholder="จำนวนเงินต่อรอบ" min="0" step="10">
-        <select id="dca-interval" style="flex:0 0 auto;">
-          <option value="1">ทุก 1 ชั่วโมง</option>
-          <option value="6">ทุก 6 ชั่วโมง</option>
-          <option value="24" selected>ทุกวัน</option>
-          <option value="168">ทุกสัปดาห์</option>
-        </select>
-        <button type="button" class="btn btn-buy" id="btn-save-dca" style="flex:0 0 auto;padding:9px 16px;">บันทึก</button>
-      </div>
-      <div class="login-note" id="dca-status" style="border:none;padding-top:0;">—</div>
-      <div class="login-note" style="border:none;padding-top:0;">ทำงานฝั่งเซิร์ฟเวอร์ผ่าน GitHub Actions (เช็คทุก ~5 นาที) จึงยังซื้อให้ตามรอบแม้ปิดหน้านี้หรือปิดเครื่องอยู่ก็ตาม — เป็นเงินจำลองสำหรับฝึกฝนเท่านั้น</div>
+      <div class="login-note" style="border:none;padding-top:0;"><b>เป้าหมาย: ได้จำนวน BTC เพิ่มขึ้น</b> (ไม่ใช่แค่กำไรเป็นเงิน) — เล่นเฉพาะไม้ยาว (ไม้เขียวยาวขายรับรอบ/ไม้แดงยาวเข้าซื้อ) บวกตั้งราคาเป้าหมายขายจาก Monte Carlo forecast แล้วบังคับซื้อคืนที่ราคาต่ำพอที่จะได้เหรียญกลับมามากกว่าเดิม ถ้าราคายังไม่ลงถึงจุดนั้นระบบจะถือเงินสดรอ ไม่ซื้อคืนแพงเด็ดขาด · ไม่มีเพดานตัดขาดทุนตายตัว (ยึดตามข้อมูล backtest) · ทำงานฝั่งเซิร์ฟเวอร์แม้ปิดหน้านี้ — เป็นแบบจำลองสถิติ ไม่ใช่คำแนะนำการลงทุน และไม่รับประกันกำไร</div>
     </div>
   </div>
 

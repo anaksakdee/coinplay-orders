@@ -88,19 +88,8 @@ function detectSpike(candles, feeRate) {
   };
 }
 
-const CORE_BUY_INTERVAL_MS = 12 * 60 * 60 * 1000; // ขาสะสมระยะยาว: ทยอยซื้อทุก 12 ชั่วโมง
-// ทุนตั้งต้นของแต่ละตลาด — ใช้เป็นฐานคิดขนาดไม้ core ให้คงที่ ไม่ใช่คิดจากเงินสดที่เหลือ
-const STARTING_BALANCE = { binance: 300, bitkub: 3000 };
-
-// ขา core: ซื้อครั้งละ 5% ของ "ทุนตั้งต้น" และรวมกันแล้วห้ามเกิน 50% ของทุน
-//
-// เดิมคิดจาก "เงินสดที่เหลือ" 10% ทุก 12 ชม. ซึ่งกินทุนหมดเร็วมาก จำลองกับทุน $300 จริงแล้ว:
-//   วันที่ 5 เหลือเงินสด $104 | วันที่ 14 เหลือ $15.65 | วันที่ 30 เหลือ $0.54
-// พอเงินสดหมด ขา swing ก็ไม่มีเงินซื้อ และเหรียญทั้งหมดถูกตีตราเป็น core ซึ่งห้ามขาย
-// ผลคือกลยุทธ์ไม้ยาวที่ทดสอบไว้ (+9.16%) จะไม่มีโอกาสทำงานเลยแม้แต่ครั้งเดียว
-// อีกทั้งไม้ core จะเล็กลงเรื่อยๆ จนต่ำกว่าขั้นต่ำจริงของตลาด ($0.05 ในวันที่ 30)
-const CORE_BUY_FRACTION = 0.05;  // 5% ของทุนตั้งต้น = $15 ต่อครั้ง (คงที่)
-const CORE_MAX_PCT = 0.50;       // สะสม core ได้สูงสุดครึ่งหนึ่งของทุน อีกครึ่งกันไว้ให้ขา swing หมุน
+// core_dca (ซื้อสะสมทุก 12ชม., 5% ของทุนตั้งต้นต่อครั้ง, เพดาน 50% ของทุน) ถอดออกแล้วตามคำขอ
+// ดูเหตุผลที่ processAutoTrade ตรงจุดที่เคยมีบล็อกนี้อยู่
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
@@ -393,99 +382,8 @@ async function processMarket(db, messaging, market, price) {
   }
 }
 
-// ออโต้เทรด DCA — ซื้อ BTC จำนวนคงที่ตามรอบเวลาที่ผู้ใช้ตั้งไว้ ไม่สนราคาขึ้นลง (เก็บสะสม BTC ระยะยาว)
-async function processDCA(db, messaging, market, price) {
-  if (!price) {
-    console.log(`[dca:${market}] no price available, skipping`);
-    return;
-  }
-  const feeRate = FEE_RATES[market];
-  const ledgerKey = LEDGER_KEY[market];
-  const usersSnap = await db.collection("users").get();
-  const now = Date.now();
-  let count = 0;
-
-  for (const userDoc of usersSnap.docs) {
-    const uid = userDoc.id;
-    const data = userDoc.data();
-    const ledger = data[ledgerKey];
-    const dca = ledger && ledger.dca;
-    if (!dca || !dca.enabled || !(dca.amount > 0)) continue;
-    const intervalMs = (dca.intervalHours || 24) * 3600 * 1000;
-    const last = dca.lastRun || 0;
-    if (now - last < intervalMs) continue;
-
-    const userRef = db.collection("users").doc(uid);
-    let notifyInfo = null;
-    try {
-      await db.runTransaction(async (tx) => {
-        const snap = await tx.get(userRef);
-        const fresh = snap.data();
-        const freshLedger = fresh[ledgerKey];
-        const freshDca = freshLedger && freshLedger.dca;
-        if (!freshDca || !freshDca.enabled || !(freshDca.amount > 0)) return;
-        const freshLast = freshDca.lastRun || 0;
-        if (now - freshLast < intervalMs) return; // อีก instance ทำไปแล้ว
-
-        const result = applyTrade(freshLedger, "buy", freshDca.amount, price, feeRate);
-        const newDca = { enabled: freshDca.enabled, amount: freshDca.amount, intervalHours: freshDca.intervalHours, lastRun: now };
-        if (!result) {
-          // เงินไม่พอตอนนี้ ข้ามรอบนี้ไปก่อน แต่อัปเดต lastRun กันไม่ให้เช็คซ้ำถี่เกิน
-          tx.update(userRef, { [`${ledgerKey}.dca`]: newDca });
-          return;
-        }
-
-        const equity = result.ledger.cash + result.ledger.btc * price;
-        tx.update(userRef, {
-          [`${ledgerKey}.cash`]: result.ledger.cash,
-          [`${ledgerKey}.btc`]: result.ledger.btc,
-          [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-          [`${ledgerKey}.lots`]: result.ledger.lots,
-          [`${ledgerKey}.dca`]: newDca,
-        });
-
-        const tradeRef = db.collection("trades").doc();
-        tx.set(tradeRef, {
-          uid,
-          email: fresh.email || null,
-          market,
-          ccy: ledgerKey,
-          side: "buy",
-          price,
-          qty: result.qty,
-          usd: result.amount,
-          fee: result.fee,
-          equityAfter: equity,
-          dca: true,
-          reason: `DCA อัตโนมัติ: ครบรอบ ${freshDca.intervalHours} ชั่วโมง จึงซื้อ ${round2(result.amount)} ตามที่ตั้งไว้ ไม่สนราคาขึ้นลง`,
-          ts: Timestamp.now(),
-        });
-
-        const logRef = db.collection("logs").doc();
-        tx.set(logRef, {
-          uid,
-          email: fresh.email || null,
-          type: "dca_triggered",
-          detail: {
-            market,
-            amount: Math.round(result.amount * 100) / 100,
-            intervalHours: freshDca.intervalHours,
-            source: "background",
-          },
-          ts: Timestamp.now(),
-        });
-
-        notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "DCA" };
-      });
-      count++;
-      console.log(`[dca:${market}] executed for user ${uid}`);
-      if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
-    } catch (err) {
-      console.error(`[dca:${market}] failed for user ${uid}:`, err.message);
-    }
-  }
-  console.log(`[dca:${market}] done, ${count} executed`);
-}
+// processDCA ถอดออกแล้ว — ออกแบบไว้สำหรับบัญชีที่เติมทุนใหม่เข้ามาเรื่อยๆ แต่บัญชีนี้ใช้ทุนก้อนเดียวคงที่
+// (ดู main() ด้านล่าง) เหลือไว้แค่หมายเหตุนี้ ไม่มีฟังก์ชันแล้ว
 
 // สรุปว่าใช้เทคนิคไหนบ้างและค่าที่ได้ตอนตัดสินใจครั้งนี้ — บันทึกลง logs ทุกครั้งที่เทรด เพื่อย้อนดูทีหลังว่า
 // เทคนิคไหนช่วย/ทำให้พลาดบ่อย จะได้เอาไปปรับปรุงโมเดล (ถ่วงน้ำหนักเทคนิคใหม่, ตัดเทคนิคที่ไม่ช่วย ฯลฯ)
@@ -770,45 +668,10 @@ async function processAutoTrade(db, messaging, market, price, candles) {
         const minTicket = market === "bitkub" ? 100 : 5; // ขั้นต่ำจริงของตลาด (Binance ~$5, Bitkub ~฿100) ไม้เล็กกว่านี้สั่งจริงไม่ผ่าน
         const blockers = [];
 
-        // ขา core ต้องมาก่อน — เดิมมีด่าน "รอซื้อคืนจาก lastSell ช่องเดียว" อยู่ตรงนี้ด้วย แต่ย้ายออกไปเป็น
-        // คิวหลายช่องใน orders[] แล้ว (ดู FORECAST_MAX_OPEN และ 1c ด้านบน) จึงไม่บล็อกขา core/signal buy อีกต่อไป
-        const coreDue = now - (fa.lastCoreBuyAt || 0) >= CORE_BUY_INTERVAL_MS;
-        const startCap = STARTING_BALANCE[market];
-        const coreSpent = fa.coreSpent || 0;
-        const coreCapLeft = startCap * CORE_MAX_PCT - coreSpent;
-
-        // ขา core: ทยอยสะสมระยะยาวเป็นรอบเวลา ตราบใดที่ไม่ใช่ขาลงรุนแรง และยังไม่ชนเพดานครึ่งทุน
-        if (coreDue && score > THRESHOLDS.strongSell && coreCapLeft >= minTicket) {
-          // ขนาดคงที่จากทุนตั้งต้น ไม่ใช่ % ของเงินสดที่เหลือ (ไม่งั้นไม้จะเล็กลงจนไร้ความหมาย)
-          const coreAmount = Math.min(coreCapLeft, Math.max(minTicket, startCap * CORE_BUY_FRACTION));
-          const result = applyTrade(fl, "buy", coreAmount, price, feeRate);
-          if (result) {
-            // ทำเครื่องหมายไม้ล่าสุดเป็นขา core เพื่อไม่ให้ระบบขายออกอัตโนมัติ
-            const lots = result.ledger.lots.slice();
-            lots[lots.length - 1] = Object.assign({}, lots[lots.length - 1], { sleeve: "core" });
-            const newAuto = Object.assign({}, fa, { lastCoreBuyAt: now, coreSpent: coreSpent + result.amount });
-            const equity = result.ledger.cash + result.ledger.btc * price;
-            tx.update(userRef, {
-              [`${ledgerKey}.cash`]: result.ledger.cash,
-              [`${ledgerKey}.btc`]: result.ledger.btc,
-              [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-              [`${ledgerKey}.lots`]: lots,
-              [`${ledgerKey}.autoTrade`]: newAuto,
-            });
-            const coreReason = `สะสมระยะยาว (core): ครบรอบสะสม ${(CORE_BUY_INTERVAL_MS / 3600000).toFixed(0)} ชั่วโมง และคะแนนรวม ${score.toFixed(1)} (${verdict}) ไม่ได้เป็นขาลงรุนแรง จึงทยอยซื้อเก็บ ${round2(result.amount)} (${(CORE_BUY_FRACTION * 100).toFixed(0)}% ของเงินสด) ได้ ${result.qty.toFixed(8)} BTC — ไม้ขานี้จะไม่ถูกขายอัตโนมัติ เก็บสะสมให้จำนวนเหรียญโตขึ้นระยะยาว`;
-            const tradeRef = db.collection("trades").doc();
-            tx.set(tradeRef, {
-              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
-              price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-              autoTrade: true, sleeve: "core", trigger: "core_dca", reason: coreReason, ts: Timestamp.now(),
-            });
-            await writeDecision(tx, uid, fresh.email, "buy", coreReason,
-              { trigger: "core_dca", sleeve: "core", btcBought: result.qty, amount: round2(result.amount) });
-            buyCount++; didSomething = true;
-            notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "สะสมระยะยาว (core)" };
-            return;
-          }
-        }
+        // core_dca (ซื้อสะสมทุก 12ชม. ไม่สนราคา) ถอดออกแล้วตามคำขอ — ออกแบบไว้สำหรับบัญชีที่เติมทุนใหม่
+        // เข้ามาเรื่อยๆ แต่บัญชีนี้ใช้ทุนก้อนเดียวคงที่ ไม่มีการเติมเงินเพิ่ม จึงไม่ล็อกทุนไว้ในขาที่ไม่ขายอีกต่อไป
+        // ไม้ core เดิมที่เคยซื้อไว้ก่อนหน้านี้ยังคงอยู่และไม่ถูกขายอัตโนมัติเหมือนเดิม (ดู sleeve==="core" filter)
+        // เหลือแค่ signal_buy (ไม้แดงยาว) เป็นกลไกเดียวที่นำทุนใหม่เข้าสู่ตลาด
 
         // พิจารณาเปิดไม้ใหม่ตามคะแนนสัญญาณ (ไม้แดงยาว)
         if (cash < minTicket) {
@@ -925,8 +788,8 @@ async function main() {
 
   await processMarket(db, messaging, "binance", binancePrice);
   await processMarket(db, messaging, "bitkub", bitkubPrice);
-  await processDCA(db, messaging, "binance", binancePrice);
-  await processDCA(db, messaging, "bitkub", bitkubPrice);
+  // processDCA/core_dca ถอดออกแล้วตามคำขอ — ทั้งสองระบบออกแบบไว้สำหรับกรณีเติมทุนใหม่เข้ามาเรื่อยๆ
+  // แต่บัญชีนี้ใช้ทุนก้อนเดียวคงที่ ไม่มีการเติมเงินเพิ่ม จึงไม่มีเหตุผลให้มีกลไกที่ล็อกทุนไว้ไม่หมุนแล้ว
   await processAutoTrade(db, messaging, "binance", binancePrice, binanceHourly);
   await processAutoTrade(db, messaging, "bitkub", bitkubPrice, bitkubHourly);
 
