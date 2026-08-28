@@ -187,8 +187,9 @@ function newDca(){
 }
 function newAutoTrade(){
   // roundTrips/btcAccumulated = ผลงานจริงของระบบตามเป้าหมาย "ได้จำนวน BTC เพิ่มขึ้น" (ไม่ใช่กำไรเป็นเงิน)
-  // minBuyFrac/maxBuyFrac = ช่วง % ของเงินสดที่ยอมลงต่อไม้ swing หนึ่งครั้ง ปรับเองได้ (ดีฟอลต์ตรงกับที่ฝั่งเซิร์ฟเวอร์ใช้ถ้าไม่ตั้ง)
-  return { enabled:false, buyAmount:0, lastBuyAt:null, roundTrips:0, btcAccumulated:0, minBuyFrac:0.15, maxBuyFrac:0.6 };
+  // minBuyFrac/maxBuyFrac = ช่วง % ของเงินสดที่ยอมลงต่อไม้ swing หนึ่งครั้ง (ไม่ได้ใช้แล้วในระบบ 3-pool ฝั่งเซิร์ฟเวอร์
+  // แต่เก็บฟิลด์ไว้เพื่อไม่ให้ UI เก่าพัง) — enabled เริ่มต้นเป็น true เสมอ ไม่ต้องกดเปิดเองหลังบัญชีใหม่/รีเซ็ต
+  return { enabled:true, buyAmount:0, lastBuyAt:null, roundTrips:0, btcAccumulated:0, minBuyFrac:0.15, maxBuyFrac:0.6 };
 }
 
 function newLedger(startingCash){
