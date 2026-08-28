@@ -4,26 +4,11 @@ import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 import { computeReturns, computeSignal } from "../shared/signals.mjs";
-import { scoreMarket, describeScore, positionFraction, THRESHOLDS, computeATR } from "../shared/strategy.mjs";
+import { scoreMarket, describeScore, THRESHOLDS, computeATR } from "../shared/strategy.mjs";
 import { evaluateIndicators, describeLearning } from "../shared/backtest.mjs";
 
 const FEE_RATES = { binance: 0.001, bitkub: 0.0025 };
 const LEDGER_KEY = { binance: "usd", bitkub: "thb" };
-const PROFIT_TARGET = 0.02; // เป้าหมายกำไรขั้นต่ำต่อรอบ 2% (ตรงกับฝั่งเว็บ)
-const STOP_LOSS_PCT = 0.05; // ตัดขาดทุนเฉพาะตอน "จำเป็นจริงๆ" เท่านั้น — ขาดทุนหนักถึง 5% และสัญญาณรวมยืนยันเป็นขาลงชัดเจน (ไม่ใช่แค่ผันผวนระยะสั้น)
-// เป้าหมายส่วนต่างเหรียญต่อรอบครบวง (ขาย -> ซื้อคืน)
-// เดิมตั้งไว้ 1% ซึ่งบังคับให้ราคาต้องย่อลงมา ~1.2% ต่ำกว่าจุดที่ขาย กว่าจะซื้อคืนได้
-// ทดสอบย้อนหลังจริงแล้วพบว่ารอบแทบไม่เคยปิดครบเลย (0-2 รอบใน 42 วัน) = กลไกสะสมเหรียญแทบไม่ทำงาน
-// ลดเหลือ 0.25% เพื่อให้รอบปิดได้จริง กำไรต่อรอบน้อยลงแต่หมุนได้บ่อยขึ้น
-const BTC_ACCUM_TARGET = 0.0025;
-
-// ราคาซื้อคืนสูงสุดที่ยังทำให้ได้ "จำนวนเหรียญเพิ่มขึ้น" ตามเป้า หลังหักค่าธรรมเนียมทั้งขาขายและขาซื้อแล้ว
-//   ขาย Q เหรียญที่ Ps -> ได้เงินสด Q*Ps*(1-f) -> ซื้อคืนที่ Pb ได้ Q' = Q*Ps*(1-f) / (Pb*(1+f))
-//   ต้องการ Q'/Q >= 1+g  =>  Pb <= Ps*(1-f) / ((1+f)*(1+g))
-// ถ้าซื้อคืนแพงกว่านี้ ต่อให้ "กำไรเป็นเงิน" ก็จะได้เหรียญ "น้อยลง" ซึ่งขัดกับเป้าหมายสะสม BTC
-function btcAccumCeiling(sellPrice, feeRate, gain) {
-  return (sellPrice * (1 - feeRate)) / ((1 + feeRate) * (1 + gain));
-}
 // (KLINE_LIMIT แท่ง 1 นาทีถูกลบไปแล้ว — ระบบใช้แท่ง 1 ชม.ล้วนตั้งแต่ scoreMarket ถึง spike detection)
 // ---------- กลยุทธ์ "เล่นเฉพาะไม้ยาว" (spike fade) ----------
 // ไม้เขียวยาว -> ขายบางส่วนรับรอบ แล้วตั้งซื้อคืนตอนราคาย่อกลับ
@@ -37,17 +22,26 @@ const SPIKE_ATR_MULTIPLE = 1.5;  // ต้องยาวกว่าควา�
 // ผลขึ้นเป็นเส้นตรงจนถึง 100% ไม่มีจุดพัง แต่ "ปิดรอบได้ 32/32 ครั้ง" มาจากตัวอย่างแค่ 32 ครั้ง
 // ทางสถิติโอกาสพลาดจริงยังอาจสูงถึง ~8.9% ถ้าเจอสปайค์ที่ไม่ย่อกลับตอนใช้ 100% = เหรียญหายยกก้อน
 // จึงเลือก 50% เป็นจุดสมดุล: ได้ผลตอบแทน ~2.8 เท่าของเดิม แต่ยังเหลือเหรียญอีกครึ่งไว้กันเหนียว
-const SPIKE_TRADE_PCT = 0.50;
-const SPIKE_MAX_OPEN = 3;        // เปิดรอบซื้อคืนพร้อมกันได้สูงสุด 3 รอบ (ให้เงินสดหมุนต่อ)
-// forecast-target sell เดิมใช้ fl.lastSell ช่องเดียวรอซื้อคืน — ทดสอบย้อนหลัง 9 ปีพบว่าตอนตลาดขาขึ้นแรง
-// ต่อเนื่อง (เช่นปี 2020 +303%) เงินจะค้างรอราคาย่อที่ไม่มาถึง และบล็อกไม่ให้ซื้อไม้ใหม่ทั้งระบบ
-// เปลี่ยนเป็นคิวหลายช่องเหมือนไม้เขียวยาว (orders[] ทำเครื่องหมาย forecast:true แยกโควตาต่างหาก)
-// ผลทดสอบ 9 ปี x 8 รอบ: เทียบถือยาว -34.08% (ช่องเดียว) -> -16.51% (คิวหลายช่อง) ดีขึ้นทุกรอบ
-const FORECAST_MAX_OPEN = 3;
-const SPIKE_RETRACE = 0.20;      // ตั้งไม้สวนที่ 20% ของลำตัวไม้ — ตรึงไว้ ห้ามขยายให้ลึกกว่านี้ (ดูเหตุผลด้านล่าง)
+// SPIKE_RETRACE ไม่ได้ใช้ตั้งเป้าซื้อคืนแบบ retrace อีกต่อไป (ระบบ pool ใหม่ขายเมื่อกำไรจริงเท่านั้น
+// ไม่ตั้งราคาเป้าล่วงหน้า) — เหลือไว้เพราะ spikeMinBodyPct ยังใช้ค่านี้เป็นตัวคูณสูตรเดิมที่ผ่าน backtest แล้ว
+// เปลี่ยนค่านี้ = เกณฑ์ไม้ยาวเปลี่ยน ต้อง backtest ใหม่ทั้งหมด (ดู scripts/three-pool-vault-test.mjs)
+const SPIKE_RETRACE = 0.20;
 const SPIKE_FEE_SAFETY = 2.5;    // ส่วนต่างที่จะได้ ต้องมากกว่าค่าธรรมเนียมไป-กลับอย่างน้อยเท่านี้
 
-function spikeRetrace() { return SPIKE_RETRACE; }
+// ---------- ระบบเทรดปัจจุบัน: "3 ก้อนคงที่ + กรุกำไรถาวร" ----------
+// แทนที่ระบบเดิม (signal_buy ขนาดแปรผัน + forecast-target + ไม้เขียวยาวขาย 50% + คิวรอราคา) ทั้งหมด
+// เพราะ backtest 9 ปี x 8 รอบพิสูจน์ว่าดีกว่าอย่างชัดเจนและเสถียร (+15.17% ถึง +15.63% เทียบถือยาว
+// ทั้งจำนวนเหรียญและมูลค่าเงิน sd <1%) เทียบกับระบบเดิมที่ดีที่สุด (+14.57% แต่ผันผวนกว่า และแพ้ทันที
+// ที่ปรับพารามิเตอร์เล็กน้อย) — ทดสอบเทียบมาแล้วกว่า 15 แนวทางอื่น (regime filter, volume filter,
+// support/resistance, ensemble หลายกลยุทธ์, MACD/RSI filter, ไม่ใช้แท่งยาว ฯลฯ) ไม่มีตัวไหนชนะสูตรนี้เลย
+//
+// กติกา: แบ่งทุนเป็น 3 ก้อนเท่าๆ กัน (คงที่ตลอด ไม่โตไม่หด) แต่ละก้อนถือได้ทีละ 1 ไม้
+//   ซื้อ: เจอไม้แดงยาว + คะแนนพอ + ก้อนนั้นว่างอยู่ -> ทุ่มเงินก้อนนั้นทั้งหมด
+//   ขาย: เจอไม้เขียวยาว + ไม้ก้อนนั้นกำไรสุทธิแล้วเท่านั้น -> ขายทั้งไม้ (ถ้ายังไม่กำไร "ติดดอย" รอต่อ
+//        ไม่มี stop-loss ไม่มี target ตายตัว — ข้อมูลพิสูจน์แล้วว่าดีกว่าไม่มีเพดานตัดขาดทุนเลย)
+//   กำไรที่ขายได้จริง (proceeds - ต้นทุนไม้นั้น) แปลงเป็น BTC ทันที เก็บเข้า "กรุ" ถาวร ไม่เอากลับมาเทรดอีก
+//   ต้นทุนกลับเข้าก้อนเดิมเสมอ ทำให้ทุนหมุนเวียนคงที่ตลอด ไม่ต้องเติมเงินใหม่ (ตามเป้าหมายที่ตั้งไว้)
+const POOL_COUNT = 3;
 
 // ขนาดไม้ขั้นต่ำ (% ของราคา) ที่ทำให้รอบนี้คุ้มค่าธรรมเนียมจริง
 // กำไรต่อรอบ ~ retrace x body ต้องชนะค่าธรรมเนียมไป-กลับ (~2 x feeRate)
@@ -234,40 +228,9 @@ function applyTrade(ledger, side, amountRaw, price, feeRate) {
   return { ledger: acc, amount, fee, qty };
 }
 
-// ขายเฉพาะเหรียญในขา swing เท่านั้น — ห้ามแตะขา core ที่ตั้งใจถือยาวไม่ขายออก
-// จำเป็นเพราะ applyTrade ขายแบบ FIFO ไล่จากล็อตหน้าสุด ซึ่งอาจเป็นล็อต core
-// (ยิ่งเพิ่ม % การเทรดต่อครั้ง ยิ่งกินขา core หนักขึ้น จนเจตนา "สะสมระยะยาว" พังทั้งหมด)
-function sellSwingOnly(ledger, qtyWanted, price, feeRate) {
-  const lots = (ledger.lots || []).map((l) => ({ ...l }));
-  let remaining = qtyWanted;
-  let sold = 0;
-  const kept = [];
-  for (const lot of lots) {
-    if (lot.sleeve === "core" || remaining <= 1e-12) { kept.push(lot); continue; }
-    if (lot.qty <= remaining) { remaining -= lot.qty; sold += lot.qty; }
-    else { kept.push({ ...lot, qty: lot.qty - remaining }); sold += remaining; remaining = 0; }
-  }
-  if (sold <= 0) return null;
-  const amount = sold * price;
-  if (amount <= 0.01) return null;
-  const fee = amount * feeRate;
-  let btc = (ledger.btc || 0) - sold;
-  if (btc < 1e-9) btc = 0;
-  const cost = kept.reduce((a, l) => a + l.qty * l.price, 0);
-  return {
-    ledger: {
-      cash: ledger.cash + amount - fee,
-      btc, lots: kept,
-      avgEntry: btc > 0 ? cost / btc : 0,
-      orders: ledger.orders || [],
-    },
-    amount, fee, qty: sold,
-  };
-}
-
-// ขาย "รอบที่ระบุ" เจาะจงตัวล็อตนั้นโดยตรง (ไม่ใช้ FIFO ทั่วไปแบบ applyTrade) — จำเป็นสำหรับออโต้เทรด
-// เพราะรอบที่เข้าเงื่อนไข (กำไรถึงเป้า/ขาดทุนเกิน) อาจไม่ใช่ล็อตที่เก่าที่สุด การใช้ applyTrade ทั่วไป
-// จะไปกินโควตาจากล็อตหน้าสุดผิดตัว ทำให้ล็อตที่เข้าเงื่อนไขจริงไม่เคยถูกขายออกและวนซ้ำไม่รู้จบ
+// ขาย "รอบที่ระบุ" เจาะจงตัวล็อตนั้นโดยตรง (ไม่ใช้ FIFO ทั่วไปแบบ applyTrade)
+// ระบบออโต้เทรดปัจจุบัน (3-pool) ไม่ได้เรียกใช้ตัวนี้แล้ว (แต่ละ pool มีไม้เดียว รู้ตัวเองอยู่แล้วว่าไม้ไหน)
+// เก็บไว้เพราะยัง export ให้ unit test เฉพาะจุดเรียกใช้อยู่ (scripts/_unit-test-*.mjs)
 function sellSpecificLot(ledger, matchLot, price, feeRate) {
   const lots = (ledger.lots || []).map((l) => ({ ...l }));
   const idx = lots.findIndex((l) => l.ts === matchLot.ts && Math.abs(l.price - matchLot.price) < 1e-9);
@@ -482,180 +445,12 @@ async function processAutoTrade(db, messaging, market, price, candles) {
     if (!autoTrade || !autoTrade.enabled) continue;
     const userRef = db.collection("users").doc(uid);
     let didSomething = false;
+    const minTicket = market === "bitkub" ? 100 : 5; // ขั้นต่ำจริงของตลาด (Binance ~$5, Bitkub ~฿100)
+    const notifications = [];
 
-    // ---------- 1) ขา swing: ขายทำกำไร/ตัดขาดทุนแบบเก่า — ปิดถาวรแล้ว ----------
-    // เคยมี 3 กลไก: (2% profit target), lock_profit_bearish, stop_loss — backtest ย้อนหลัง 5 ปีแบบ
-    // ทั้งระบบรวมกันพบว่าทั้ง 3 ตัวทำลายพอร์ตด้วยรูปแบบเดียวกันเป๊ะ: ขายไม้ swing ถี่เกิน (60-76 ครั้ง/5ปี)
-    // จนขา swing เหลือเหรียญศูนย์ ไปแย่งบทบาทกลยุทธ์ "ไม้ยาว" (ไม้เขียวยาวขายรับรอบ/ไม้แดงยาวเข้าซื้อ)
-    // ที่มีคิวซื้อคืนของตัวเองอยู่แล้ว (สูงสุด 3 รอบ):
-    //   2% profit target เปิดไว้:      -49.01% เทียบถือยาว
-    //   lock_profit_bearish เปิดไว้:   -49.01% เทียบถือยาว (รูปแบบเดียวกันเป๊ะ ไม่เคยผ่าน backtest มาก่อน)
-    //   stop_loss เปิดไว้:             -43.33% เฉลี่ย 8 รอบ (sd 1.6% เสถียร ไม่ใช่บังเอิญจาก Monte Carlo)
-    //   ปิดทั้ง 3 ตัว เหลือแค่ไม้ยาว+core: +14.57% เฉลี่ย 8 รอบ (sd 1.8%) — ตรงกับที่เคยยืนยันไว้ก่อนหน้า
-    // ผลคือบัญชีไม่มีเพดานตัดขาดทุนอีกต่อไป (แลกมาเพื่อให้กลยุทธ์ไม้ยาวทำงานได้เต็มที่ตามข้อมูลจริง)
-    // ดู scripts/forecast-target-test.mjs สำหรับสคริปต์ backtest ที่ใช้ยืนยันตัวเลขข้างต้น
-
-    // ---------- 1b) ไม้เขียวยาว: ขายรับรอบ 20% แล้วตั้งคำสั่งซื้อคืนตอนราคาย่อ ----------
-    // ใช้ระบบ "คำสั่งรอราคา" (orders) ที่มีอยู่แล้ว ซึ่ง processMarket จะคอยเช็คให้ทุกรอบ
-    if (spike && spike.isSpike && spike.direction === "up") {
-      let notifyInfo = null;
-      try {
-        await db.runTransaction(async (tx) => {
-          const snap = await tx.get(userRef);
-          const fresh = snap.data();
-          const fl = fresh[ledgerKey];
-          const fa = fl && fl.autoTrade;
-          if (!fa || !fa.enabled) return;
-          if (!(fl.btc > 0)) return;
-          // ถ้ามีคำสั่งซื้อคืนจากไม้ยาวรอบก่อนค้างอยู่ ไม่ต้องซ้อนอีก
-          // เปิดรอบพร้อมกันได้หลายรอบ เพื่อให้เงินสดหมุนต่อ ไม่ใช่จมรอรอบเดียวจบ
-          // เดิมจำกัดไว้ 1 รอบ ทำให้สปайค์ถัดไปถูกข้ามทั้งหมดระหว่างรอซื้อคืน (เคยรอนานถึง 64 วัน)
-          // ทดสอบ 5 ปี: 1 รอบ -> ปิดได้ 32 รอบ เหรียญเพิ่ม +9.16%
-          //             3 รอบ -> ปิดได้ 86 รอบ เหรียญเพิ่ม +14.95%  <- เลือกอันนี้
-          //             5 รอบ -> ปิดได้ 89 รอบ เหรียญเพิ่ม +15.02% (เพิ่มขึ้นน้อยมาก ไม่คุ้มความซับซ้อน)
-          const openSpikes = (fl.orders || []).filter((o) => o.spike).length;
-          if (openSpikes >= SPIKE_MAX_OPEN) return;
-
-          // คิด % จากเหรียญในขา swing เท่านั้น ไม่นับขา core ที่ตั้งใจถือยาว
-          const swingBtc = (fl.lots || []).filter((l) => l.sleeve !== "core").reduce((a, l) => a + l.qty, 0);
-          if (!(swingBtc > 0)) return;
-          const qty = swingBtc * SPIKE_TRADE_PCT;
-          const amount = qty * price;
-          const minTicket = market === "bitkub" ? 100 : 5;
-          if (amount < minTicket) return;
-
-          const result = sellSwingOnly(fl, qty, price, feeRate);
-          if (!result) return;
-
-          // ตั้งซื้อคืนที่ราคาย่อลงมา 20% ของลำตัวไม้ ใช้เงินที่เพิ่งขายได้ทั้งก้อน
-          const retrace = spikeRetrace();
-          const target = round2(price - retrace * Math.abs(spike.body));
-          const expectedGainPct = ((price * (1 - feeRate)) / (target * (1 + feeRate)) - 1) * 100;
-          const order = {
-            id: "spk" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            // ใช้ "เงินที่ได้จากการขายรอบนี้" พอดีเป๊ะ ไม่ไปดึงเงินสดก้อนอื่นมาเสริม
-            // เงินสดที่ได้จริง = result.amount*(1-fee) และตอนซื้อต้องกันค่าธรรมเนียมอีก (1+fee)
-            // จึงต้องหารด้วย (1+fee) ไม่งั้นจะใช้เงินเกินไปประมาณ 0.1% ของก้อนทุกรอบ
-            side: "buy", targetPrice: target,
-            amount: round2((result.amount * (1 - feeRate)) / (1 + feeRate)),
-            createdAt: now, spike: true,
-          };
-          const equity = result.ledger.cash + result.ledger.btc * price;
-
-          tx.update(userRef, {
-            [`${ledgerKey}.cash`]: result.ledger.cash,
-            [`${ledgerKey}.btc`]: result.ledger.btc,
-            [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-            [`${ledgerKey}.lots`]: result.ledger.lots,
-            [`${ledgerKey}.orders`]: (fl.orders || []).concat([order]),
-          });
-
-          const reasonText = `ไม้เขียวยาว: แท่งล่าสุดพุ่งขึ้น ${spike.bodyPct.toFixed(2)}% (ยาวกว่าปกติ ${(Math.abs(spike.body) / spike.atr).toFixed(1)} เท่าของ ATR และผ่านขั้นต่ำ ${spike.minBody.toFixed(2)}% ที่คุ้มค่าธรรมเนียม) จึงขายรับรอบ ${(SPIKE_TRADE_PCT * 100).toFixed(0)}% ของเหรียญที่ถือ = ${result.qty.toFixed(8)} BTC ที่ราคา ${round2(price)} แล้วตั้งซื้อคืนอัตโนมัติไว้ที่ ${target} (ย่อลง ${(retrace * 100).toFixed(0)}% ของลำตัวไม้) ถ้าราคาย่อถึงจะได้เหรียญกลับมามากกว่าเดิมประมาณ ${expectedGainPct.toFixed(2)}%`;
-
-          const tradeRef = db.collection("trades").doc();
-          tx.set(tradeRef, {
-            uid, email: fresh.email || null, market, ccy: ledgerKey, side: "sell",
-            price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-            autoTrade: true, sleeve: "swing", trigger: "spike_up_fade", reason: reasonText, ts: Timestamp.now(),
-          });
-          await writeDecision(tx, uid, fresh.email, "sell", reasonText, {
-            trigger: "spike_up_fade", sleeve: "swing",
-            bodyPct: round2(spike.bodyPct), minBodyPct: round2(spike.minBody),
-            btcSold: result.qty, rebuyTarget: target,
-            expectedBtcGainPct: round2(expectedGainPct),
-          });
-          sellCount++;
-          notifyInfo = { side: "sell", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "ไม้เขียวยาว ขายรับรอบ" };
-        });
-        if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
-      } catch (err) {
-        console.error(`[auto:${market}] spike sell failed for ${uid}:`, err.message);
-      }
-    }
-
-    // ---------- 1c) forecast target: ไม้ swing ถึงราคาเป้าหมายจาก Monte Carlo แล้วขายทั้งไม้ ----------
-    // เพิ่มจากกลยุทธ์ไม้ยาวเดิม (ไม่แทนที่) — เป้าหมาย = p90 ของ Monte Carlo forecast (20 แท่งข้างหน้า)
-    // ตั้งครั้งแรกตอนเจอไม้ แล้ว "รี้ดขึ้นอย่างเดียว" ทุกรอบตาม forecast ล่าสุด ไม่มีวันลดลง (เก็บไว้ที่ l.fcTarget)
-    // ขายก็ต่อเมื่อราคาปัจจุบันถึงเป้าและมีกำไรสุทธิจริง (กันขายขาดทุนตอน forecast มองลบ)
-    // backtest 5 ปี x 8 รอบเฉลี่ย: ช่วยให้ได้เหรียญจากการหมุนรอบเพิ่มขึ้นเมื่อรวมกับกลยุทธ์ไม้ยาวที่ผ่านแล้ว
-    {
-      const forecast = analysis.signal && analysis.signal.forecast;
-      let keepChecking2 = !!(forecast && forecast.p90 > 0), guard2 = 0;
-      while (keepChecking2 && guard2 < 30) {
-        keepChecking2 = false; guard2++;
-        let notifyInfo = null;
-        try {
-          await db.runTransaction(async (tx) => {
-            const snap = await tx.get(userRef);
-            const fresh = snap.data();
-            const fl = fresh[ledgerKey];
-            const fa = fl && fl.autoTrade;
-            if (!fa || !fa.enabled || !fl.lots || !fl.lots.length) return;
-
-            const openForecast = (fl.orders || []).filter((o) => o.forecast).length;
-
-            const lots = fl.lots.map((l) => ({ ...l }));
-            let lot = null;
-            for (const l of lots) {
-              if (l.sleeve === "core") continue;
-              l.fcTarget = Math.max(l.fcTarget || 0, forecast.p90);
-              const netPnlPct = (price * (1 - feeRate) / (l.price * (1 + feeRate)) - 1) * 100;
-              if (price >= l.fcTarget && netPnlPct > 0 && openForecast < FORECAST_MAX_OPEN) { lot = l; break; }
-            }
-            // เขียนเป้าหมายที่รี้ดขึ้นกลับไปเสมอ แม้ยังไม่ถึงเป้า จะได้รี้ดต่อจากค่านี้ในรอบหน้า
-            tx.update(userRef, { [`${ledgerKey}.lots`]: lots });
-            if (!lot) return;
-
-            const result = sellSpecificLot(fl, lot, price, feeRate);
-            if (!result) return;
-            const equity = result.ledger.cash + result.ledger.btc * price;
-            // ตั้งคำสั่งซื้อคืนแบบคิวหลายช่อง (เหมือนไม้เขียวยาว) แทน fl.lastSell ช่องเดียว — กันบล็อกทั้งระบบ
-            // ตอนตลาดขาขึ้นแรงต่อเนื่องแล้วราคาไม่ย่อกลับมาถึงเพดานซื้อคืน (ดู FORECAST_MAX_OPEN ด้านบน)
-            const rebuyTarget = round2(btcAccumCeiling(price, feeRate, BTC_ACCUM_TARGET));
-            const rebuyOrder = {
-              id: "fct" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-              side: "buy", targetPrice: rebuyTarget,
-              amount: round2((result.amount * (1 - feeRate)) / (1 + feeRate)),
-              createdAt: now, forecast: true,
-            };
-            const reasonText = `ถึงราคาเป้าหมายจาก Monte Carlo: ไม้นี้ซื้อที่ ${round2(lot.price)} ตอนนี้ราคา ${round2(price)} ถึงเป้าหมายที่คาดการณ์ไว้ ${round2(lot.fcTarget)} แล้ว (กำไรสุทธิ +${((price * (1 - feeRate) / (lot.price * (1 + feeRate)) - 1) * 100).toFixed(2)}%) จึงขายทำกำไรทั้งไม้ แล้วตั้งซื้อคืนอัตโนมัติไว้ที่ ${rebuyTarget}`;
-
-            tx.update(userRef, {
-              [`${ledgerKey}.cash`]: result.ledger.cash,
-              [`${ledgerKey}.btc`]: result.ledger.btc,
-              [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-              [`${ledgerKey}.lots`]: result.ledger.lots,
-              [`${ledgerKey}.orders`]: (fl.orders || []).concat([rebuyOrder]),
-            });
-
-            const tradeRef = db.collection("trades").doc();
-            tx.set(tradeRef, {
-              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "sell",
-              price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-              autoTrade: true, sleeve: "swing", trigger: "forecast_target", reason: reasonText, ts: Timestamp.now(),
-            });
-            await writeDecision(tx, uid, fresh.email, "sell", reasonText, {
-              trigger: "forecast_target",
-              lotBoughtAt: round2(lot.price),
-              forecastTarget: round2(lot.fcTarget),
-              btcSold: result.qty,
-              proceeds: round2(result.amount),
-            });
-
-            sellCount++; didSomething = true;
-            keepChecking2 = true;
-            notifyInfo = { side: "sell", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "ถึงราคาเป้าหมาย (forecast)" };
-          });
-          if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
-        } catch (err) {
-          console.error(`[auto:${market}] forecast target sell failed for ${uid}:`, err.message);
-          keepChecking2 = false;
-        }
-      }
-    }
-
-    // ---------- 2) พิจารณาซื้อ (ทั้งขา swing และขา core) ----------
-    let notifyInfo = null;
+    // ---------- ระบบ 3 ก้อนคงที่ ($100/฿1,000 ต่อก้อน) + กรุกำไรถาวร ----------
+    // ดูเหตุผลและหลักฐาน backtest ที่คอมเมนต์ POOL_COUNT ด้านบนไฟล์ ทำทั้งขายและซื้อในทรานแซกชันเดียว
+    // เพื่อให้สถานะก้อนสอดคล้องกันเสมอ (ขายก่อนแล้วเงินที่คืนก้อนอาจเอาไปซื้อไม้ใหม่ในรอบเดียวกันได้เลย)
     try {
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(userRef);
@@ -664,108 +459,144 @@ async function processAutoTrade(db, messaging, market, price, candles) {
         const fa = fl && fl.autoTrade;
         if (!fa || !fa.enabled) return;
 
-        const cash = fl.cash || 0;
-        const minTicket = market === "bitkub" ? 100 : 5; // ขั้นต่ำจริงของตลาด (Binance ~$5, Bitkub ~฿100) ไม้เล็กกว่านี้สั่งจริงไม่ผ่าน
-        const blockers = [];
+        // เริ่มก้อนครั้งแรก (หรือหลังรีเซ็ตบัญชี/เพิ่งเปลี่ยนมาระบบนี้): แบ่งเงินสดที่มีอยู่ตอนนี้เท่าๆ กัน
+        // ถ้ามีไม้เดิมค้างอยู่ก่อนเปลี่ยนระบบ ใส่เข้าก้อนตามลำดับก่อน ที่เหลือค่อยแบ่งเงินสดเข้าก้อนที่ว่าง
+        let pools = Array.isArray(fa.pools) && fa.pools.length === POOL_COUNT
+          ? fa.pools.map((p) => ({ cash: p.cash || 0, lot: p.lot ? { ...p.lot } : null }))
+          : null;
+        if (!pools) {
+          const existingLots = (fl.lots || []).filter((l) => l.qty > 0);
+          pools = [];
+          for (let i = 0; i < POOL_COUNT; i++) {
+            pools.push(existingLots[i]
+              ? { cash: 0, lot: { qty: existingLots[i].qty, price: existingLots[i].price, ts: existingLots[i].ts || now } }
+              : { cash: 0, lot: null });
+          }
+          const emptyPools = pools.filter((p) => !p.lot);
+          const perPool = emptyPools.length ? (fl.cash || 0) / emptyPools.length : 0;
+          for (const p of emptyPools) p.cash = perPool;
+        }
+        let vaultBtc = fa.vaultBtc || 0;
+        let vaultAvgPrice = fa.vaultAvgPrice || 0;
 
-        // core_dca (ซื้อสะสมทุก 12ชม. ไม่สนราคา) ถอดออกแล้วตามคำขอ — ออกแบบไว้สำหรับบัญชีที่เติมทุนใหม่
-        // เข้ามาเรื่อยๆ แต่บัญชีนี้ใช้ทุนก้อนเดียวคงที่ ไม่มีการเติมเงินเพิ่ม จึงไม่ล็อกทุนไว้ในขาที่ไม่ขายอีกต่อไป
-        // ไม้ core เดิมที่เคยซื้อไว้ก่อนหน้านี้ยังคงอยู่และไม่ถูกขายอัตโนมัติเหมือนเดิม (ดู sleeve==="core" filter)
-        // เหลือแค่ signal_buy (ไม้แดงยาว) เป็นกลไกเดียวที่นำทุนใหม่เข้าสู่ตลาด
+        // ---------- 1) ขาย: ไม้เขียวยาว -> ขายทุกก้อนที่ถือไม้และกำไรสุทธิเป็นบวกแล้ว ----------
+        // ไม่มี stop-loss ไม่มี target ตายตัว — ก้อนที่ยังไม่กำไร ("ติดดอย") รอต่อจนกว่าจะกำไรแล้วค่อยขาย
+        if (spike && spike.isSpike && spike.direction === "up") {
+          for (let i = 0; i < pools.length; i++) {
+            const pool = pools[i];
+            if (!pool.lot) continue;
+            const lotQty = pool.lot.qty, lotPrice = pool.lot.price;
+            const netPnlPct = (price * (1 - feeRate) / (lotPrice * (1 + feeRate)) - 1) * 100;
+            if (!(netPnlPct > 0)) continue;
 
-        // พิจารณาเปิดไม้ใหม่ตามคะแนนสัญญาณ (ไม้แดงยาว)
-        if (cash < minTicket) {
-          await writeDecision(tx, uid, fresh.email, "hold",
-            `ไม่ซื้อ: เงินสดคงเหลือ ${round2(cash)} น้อยเกินกว่าจะเปิดไม้ใหม่ได้ (ขั้นต่ำ ${minTicket}) — เงินถูกแปลงเป็น BTC ไปเกือบหมดแล้ว ระบบจะรอจังหวะขายทำกำไรเพื่อให้มีเงินสดกลับมาหมุนต่อ`,
-            { trigger: "no_cash", cash: round2(cash) });
-          holdCount++;
-          return;
+            const proceeds = lotQty * price * (1 - feeRate);
+            const cost = lotQty * lotPrice * (1 + feeRate);
+            const fee = lotQty * price * feeRate;
+            const profitUsd = Math.max(0, proceeds - cost);
+            const profitBtc = profitUsd / price;
+
+            const reasonText = `ไม้เขียวยาว: แท่งล่าสุดพุ่งขึ้น ${spike.bodyPct.toFixed(2)}% (ยาวกว่าปกติ ${(Math.abs(spike.body) / spike.atr).toFixed(1)} เท่าของ ATR ผ่านขั้นต่ำ ${spike.minBody.toFixed(2)}%) ก้อนที่ ${i + 1}/${POOL_COUNT} ซื้อไว้ที่ ${round2(lotPrice)} ตอนนี้ราคา ${round2(price)} กำไรสุทธิ +${netPnlPct.toFixed(2)}% จึงขายทั้งไม้ ${lotQty.toFixed(8)} BTC ได้เงิน ${round2(proceeds)} คืนทุน ${round2(cost)} เข้าก้อนเดิม ส่วนกำไร ${round2(profitUsd)} แปลงเป็น BTC ${profitBtc.toFixed(8)} เก็บเข้ากรุถาวร (ไม่เอากลับมาเทรดอีก)`;
+
+            const tradeRef = db.collection("trades").doc();
+            tx.set(tradeRef, {
+              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "sell",
+              price, qty: lotQty, usd: proceeds, fee, equityAfter: null,
+              autoTrade: true, sleeve: `pool${i}`, trigger: "pool_sell_profit", reason: reasonText, ts: Timestamp.now(),
+            });
+            await writeDecision(tx, uid, fresh.email, "sell", reasonText, {
+              trigger: "pool_sell_profit", pool: i,
+              lotBoughtAt: round2(lotPrice), btcSold: lotQty,
+              proceeds: round2(proceeds), profitUsd: round2(profitUsd), profitBtc: round2(profitBtc),
+            });
+
+            vaultAvgPrice = vaultBtc + profitBtc > 0 ? (vaultAvgPrice * vaultBtc + price * profitBtc) / (vaultBtc + profitBtc) : price;
+            vaultBtc += profitBtc;
+            pool.cash += cost;
+            pool.lot = null;
+            sellCount++; didSomething = true;
+            notifications.push({ side: "sell", qty: lotQty, price, amount: proceeds, market, ccy: ledgerKey, note: `ขายทำกำไรก้อนที่ ${i + 1}` });
+          }
         }
 
-        // ขา swing: เข้าเทรด "เฉพาะไม้ยาว" เท่านั้น ไม่ไล่ซื้อไม้สั้นระหว่างทาง
-        // ไม้แดงยาว = จังหวะเข้าซื้อ (ราคาดิ่งแรงเกินจริง มีโอกาสเด้ง) แล้วตั้งขายตอนเด้งกลับ
-        // ไม้เขียวยาวจะไปเข้าเงื่อนไข "ขายรับรอบ" ด้านบนแทน ไม่ใช่จุดซื้อ
-        if (!spike || !spike.isSpike) {
+        // ---------- 2) ซื้อ: ไม้แดงยาว + คะแนนพอ -> ทุ่มเงินทั้งก้อนในทุกก้อนที่ว่างอยู่ ----------
+        const isBuySignal = spike && spike.isSpike && spike.direction === "down" && score >= THRESHOLDS.weakBuy;
+        let anyBuy = false;
+        const blockers = [];
+        if (isBuySignal) {
+          for (let i = 0; i < pools.length; i++) {
+            const pool = pools[i];
+            if (pool.lot) continue; // ก้อนนี้ไม่ว่าง ถือไม้อยู่แล้ว
+            if (pool.cash < minTicket) continue; // เงินในก้อนนี้น้อยเกินขั้นต่ำตลาด
+
+            const amount = pool.cash;
+            const qty = (amount * (1 - feeRate)) / price;
+            const fee = amount * feeRate;
+
+            const reasonText = `ไม้แดงยาว: แท่งล่าสุดดิ่งลง ${spike.bodyPct.toFixed(2)}% (ยาวกว่าปกติ ${(Math.abs(spike.body) / spike.atr).toFixed(1)} เท่าของ ATR ผ่านขั้นต่ำ ${spike.minBody.toFixed(2)}% คะแนนรวม ${score.toFixed(1)} = ${verdict}) ก้อนที่ ${i + 1}/${POOL_COUNT} ว่างอยู่ จึงทุ่มเงินก้อนนี้ทั้งหมด ${round2(amount)} ซื้อที่ ${round2(price)} ได้ ${qty.toFixed(8)} BTC จะขายทั้งไม้เมื่อกำไรสุทธิเป็นบวกและเจอไม้เขียวยาวรอบถัดไป (ไม่มี stop-loss)`;
+
+            const tradeRef = db.collection("trades").doc();
+            tx.set(tradeRef, {
+              uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
+              price, qty, usd: amount, fee, equityAfter: null,
+              autoTrade: true, sleeve: `pool${i}`, trigger: "pool_buy_spike", reason: reasonText, ts: Timestamp.now(),
+            });
+            await writeDecision(tx, uid, fresh.email, "buy", reasonText, {
+              trigger: "pool_buy_spike", pool: i, btcBought: qty, amount: round2(amount),
+            });
+
+            pool.lot = { qty, price, ts: now };
+            pool.cash = 0;
+            buyCount++; didSomething = true; anyBuy = true;
+            notifications.push({ side: "buy", qty, price, amount, market, ccy: ledgerKey, note: `เปิดไม้ก้อนที่ ${i + 1}` });
+          }
+          if (!anyBuy) {
+            const fullPools = pools.filter((p) => p.lot).length;
+            blockers.push(fullPools === POOL_COUNT
+              ? `ถือครบทั้ง ${POOL_COUNT} ก้อนอยู่แล้ว รอขายก้อนใดก้อนหนึ่งก่อนถึงจะเปิดไม้ใหม่ได้`
+              : `เงินสดในก้อนที่ว่างน้อยกว่าขั้นต่ำตลาด (${minTicket})`);
+          }
+        } else if (!spike || !spike.isSpike) {
           blockers.push(spike && spike.longEnough
             ? `แท่งล่าสุดยาว ${spike.bodyPct.toFixed(2)}% ยังไม่ถึงขั้นต่ำ ${spike.minBody.toFixed(2)}% ที่จะคุ้มค่าธรรมเนียม`
             : `แท่งล่าสุดเป็นไม้สั้น/ปกติ ไม่ใช่จังหวะเข้าตามกลยุทธ์ (เล่นเฉพาะไม้ยาว)`);
         } else if (spike.direction === "up") {
           blockers.push(`ไม้ล่าสุดเป็นไม้เขียวยาว (ราคาพุ่งขึ้น) ไม่ใช่จังหวะซื้อ — เป็นจังหวะขายรับรอบแทน`);
+        } else if (score < THRESHOLDS.weakBuy) {
+          blockers.push(`คะแนนรวม ${score.toFixed(1)} ยังต่ำกว่าเกณฑ์ซื้อ ${THRESHOLDS.weakBuy}`);
         }
-        if (score < THRESHOLDS.weakBuy) blockers.push(`คะแนนรวม ${score.toFixed(1)} ยังต่ำกว่าเกณฑ์ซื้อ ${THRESHOLDS.weakBuy}`);
 
-        // ไม่จำกัดว่าห้ามซื้อที่ราคาใกล้ไม้เดิม — ซื้อกองที่ราคาเดียวกันไม่ผิด ถ้าสัญญาณบอกว่าควรซื้อ
-        // ตัวตัดสินคือ "คุณภาพสัญญาณ" อย่างเดียว (คะแนนรวมจากอินดิเคเตอร์ที่ถ่วงน้ำหนักตามความแม่นจริง)
+        // ---------- รวมสถานะก้อนทั้งหมดกลับเป็น fl.cash / fl.btc / fl.lots / fl.avgEntry ให้ UI แสดงผลได้ ----------
+        // กรุถาวรถูก tag เป็น sleeve:"core" (ตามธรรมเนียมเดิมของ UI ที่ไม่ขายอัตโนมัติ) แต่จริงๆ ไม่ถูกขายเลย
+        const newCash = pools.reduce((s, p) => s + p.cash, 0);
+        const poolLots = pools
+          .map((p, i) => (p.lot ? { qty: p.lot.qty, price: p.lot.price, ts: p.lot.ts, sleeve: `pool${i}` } : null))
+          .filter(Boolean);
+        const newLots = vaultBtc > 1e-10
+          ? poolLots.concat([{ qty: vaultBtc, price: vaultAvgPrice, ts: now, sleeve: "core" }])
+          : poolLots;
+        const newBtc = poolLots.reduce((s, l) => s + l.qty, 0) + vaultBtc;
+        const costBasis = newLots.reduce((s, l) => s + l.qty * l.price, 0);
+        const newAvgEntry = newBtc > 1e-10 ? costBasis / newBtc : 0;
+
+        tx.update(userRef, {
+          [`${ledgerKey}.cash`]: newCash,
+          [`${ledgerKey}.btc`]: newBtc,
+          [`${ledgerKey}.avgEntry`]: newAvgEntry,
+          [`${ledgerKey}.lots`]: newLots,
+          [`${ledgerKey}.autoTrade`]: Object.assign({}, fa, { pools, vaultBtc, vaultAvgPrice, lastCheckAt: now }),
+        });
 
         if (blockers.length) {
           const topReasons = analysis.parts.slice().sort((a, b) => Math.abs(b.score * b.weight) - Math.abs(a.score * a.weight)).slice(0, 3);
-          await writeDecision(tx, uid, fresh.email, "hold",
-            `ยังไม่เข้าเงื่อนไขซื้อ: ${blockers.join(" และ ")} — สรุปสภาพตลาดตอนนี้: ${verdict} (คะแนน ${score.toFixed(1)}) ปัจจัยที่มีน้ำหนักที่สุดคือ ${topReasons.map((r) => r.text).join(" | ")}`,
-            { trigger: "below_threshold", blockers, cash: round2(cash) });
+          const openPools = pools.filter((p) => p.lot).length;
+          const holdReason = `${openPools > 0 ? `ถือ ${openPools}/${POOL_COUNT} ก้อนรอจังหวะ` : "ยังไม่เข้าเงื่อนไขซื้อ"}: ${blockers.join(" และ ")} — สรุปสภาพตลาดตอนนี้: ${verdict} (คะแนน ${score.toFixed(1)}) ปัจจัยที่มีน้ำหนักที่สุดคือ ${topReasons.map((r) => r.text).join(" | ")}`;
+          await writeDecision(tx, uid, fresh.email, "hold", holdReason, { trigger: "no_action", blockers, poolsOpen: openPools, cash: round2(newCash) });
           holdCount++;
-          return;
         }
-
-        const frac = positionFraction(score, analysis.atrPct, fa.minBuyFrac, fa.maxBuyFrac);
-        const amount = Math.max(minTicket, cash * frac);
-        const result = applyTrade(fl, "buy", amount, price, feeRate);
-        if (!result) return;
-        const newAuto = Object.assign({}, fa, { lastBuyAt: now });
-        const equity = result.ledger.cash + result.ledger.btc * price;
-        tx.update(userRef, {
-          [`${ledgerKey}.cash`]: result.ledger.cash,
-          [`${ledgerKey}.btc`]: result.ledger.btc,
-          [`${ledgerKey}.avgEntry`]: result.ledger.avgEntry,
-          [`${ledgerKey}.lots`]: result.ledger.lots,
-          [`${ledgerKey}.autoTrade`]: newAuto,
-        });
-        const topReasons = analysis.parts.slice().sort((a, b) => b.score * b.weight - a.score * a.weight).slice(0, 3);
-        const swingReason = `เปิดไม้เทรดสั้น (swing): คะแนนรวม ${score.toFixed(1)} = ${verdict} ผ่านเกณฑ์ซื้อ ${THRESHOLDS.weakBuy} จึงลงเงิน ${round2(result.amount)} (${(frac * 100).toFixed(0)}% ของเงินสด ปรับขนาดตามความมั่นใจและความผันผวน ATR ${analysis.atrPct ? analysis.atrPct.toFixed(2) + "%" : "n/a"}) ได้ ${result.qty.toFixed(8)} BTC — เหตุผลหลักที่เข้าซื้อ: ${topReasons.map((r) => r.text).join(" | ")} — ไม้นี้จะถูกขายรับรอบเมื่อเจอไม้เขียวยาว (ไม่ได้ตั้งขายที่ราคาตายตัว)`;
-        const tradeRef = db.collection("trades").doc();
-        tx.set(tradeRef, {
-          uid, email: fresh.email || null, market, ccy: ledgerKey, side: "buy",
-          price, qty: result.qty, usd: result.amount, fee: result.fee, equityAfter: equity,
-          autoTrade: true, sleeve: "swing", trigger: "signal_buy", reason: swingReason, ts: Timestamp.now(),
-        });
-        await writeDecision(tx, uid, fresh.email, "buy", swingReason,
-          {
-            trigger: "signal_buy", sleeve: "swing",
-            btcBought: result.qty, amount: round2(result.amount),
-            positionFractionPct: round2(frac * 100),
-            targetSellPrice: round2(price * (1 + PROFIT_TARGET) / (1 - feeRate)),
-          });
-        buyCount++; didSomething = true;
-        notifyInfo = { side: "buy", qty: result.qty, price, amount: result.amount, market, ccy: ledgerKey, note: "เปิดไม้ใหม่ตามสัญญาณ" };
       });
-      if (notifyInfo) await notifyTrade(db, messaging, uid, notifyInfo);
+      for (const info of notifications) await notifyTrade(db, messaging, uid, info);
     } catch (err) {
-      console.error(`[auto:${market}] buy failed for ${uid}:`, err.message);
-    }
-
-    if (!didSomething) {
-      // ไม่มีทั้งซื้อและขาย และยังไม่ได้บันทึกเหตุผลไว้ (เช่นแค่ถือไม้รอราคาขึ้น) -> บันทึกสถานะการถือไว้ด้วย
-      try {
-        const snap = await userRef.get();
-        const fl = snap.data()[ledgerKey];
-        if (fl && fl.lots && fl.lots.length && !(fl.lastSell && fl.lastSell.qty > 0)) {
-          const swingLots = fl.lots.filter((l) => l.sleeve !== "core");
-          if (swingLots.length) {
-                        await db.collection("logs").add({
-              uid, email: data.email || null, type: "auto_decision",
-              detail: {
-                market, action: "hold", source: "background", trigger: "holding_position",
-                reason: `ถือไม้รอจังหวะ: มีไม้เทรดสั้นค้างอยู่ ${swingLots.length} ไม้ ระบบจะขายรับรอบก็ต่อเมื่อเจอไม้เขียวยาว (>=2.5% บนกราฟ 1 ชม.) หรือเข้าเงื่อนไขตัดขาดทุน ตอนนี้ราคา ${round2(price)} คะแนนรวม ${score.toFixed(1)} (${verdict}) ยังไม่เข้าเงื่อนไขขาย`,
-                market_analysis: marketSnapshot,
-                openSwingLots: swingLots.length,
-              },
-              ts: Timestamp.now(),
-            });
-            holdCount++;
-          }
-        }
-      } catch (err) {
-        console.error(`[auto:${market}] hold log failed for ${uid}:`, err.message);
-      }
+      console.error(`[auto:${market}] pool trade failed for ${uid}:`, err.message);
     }
   }
   console.log(`[auto:${market}] done, ${sellCount} sells, ${buyCount} buys, ${holdCount} holds logged`);
